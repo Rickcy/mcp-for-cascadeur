@@ -16,6 +16,10 @@ and integration modules listed in CI. Ruff lint and formatting checks passed
 for the package, tests, examples and native acceptance scripts. Fresh-wheel
 stdio/SDK acceptance is documented in [package-validation.md](package-validation.md).
 
+All four [hosted matrix jobs for the implementation commit](https://github.com/Rickcy/mcp-for-cascadeur/actions/runs/42259028598)
+passed on Windows/Linux with Python 3.11/3.12, including isolated wheel discovery
+and official MCP SDK acceptance. These jobs do not run the native application.
+
 | Native case | Observed result |
 | --- | --- |
 | Complete model capture | 289 objects, 26 frames, 8,745 channels, 13 tracks; consecutive captures compare with zero differences. Checkpoint approximately 9.6 MB. |

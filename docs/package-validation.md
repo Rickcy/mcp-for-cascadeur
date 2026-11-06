@@ -18,7 +18,9 @@ confirmed to reside in that environment's `site-packages`.
 | Input validation | Boolean input for an integer frame is rejected before any HTTP submission. |
 | Runner timeout | An emulated native timeout retains its request ID, reports an unknown outcome, recommends `transaction_status`, and does not retry the edit. |
 | Installation side effects | Help/discovery create no user configuration; SDK acceptance uses disposable settings. |
-| Runtime contents | All 26 runtime Python modules match the checkout and installed wheel byte for byte, including the final Static-getter, selection and native-Euler fixes. |
+| Package contents | All 26 packaged Python modules match the checkout and installed wheel byte for byte, including the final Static-getter, selection and native-Euler fixes. |
+| Installed native runtime | All 20 host/runtime modules match the checkout byte for byte; live diagnostics report adapter 0.2.0. |
+| Published Git installation | Isolated `uvx` discovery from commit `a4d4a5b765aa13fb035459be68dd3f9634fb898a` returns 96 tools without setup or configuration changes. |
 
 The HTTP fixture validates the packaged protocol and resource wiring. It is not
 native animation evidence. Actual Cascadeur acceptance is recorded separately
