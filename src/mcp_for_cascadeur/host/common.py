@@ -103,11 +103,21 @@ def modify(scene, label: str, callback):
     def apply(model, _update_editor, updater):
         try:
             results.append(callback(model, updater))
+            from . import recovery
+
+            recovery.observe_callback(scene)
         except Exception as error:
             captured.append(error)
             raise
 
+    from . import recovery
+
+    recovery.note_native_attempt(scene)
     accepted = scene.modify_update(label, apply)
+    if accepted:
+        from . import recovery
+
+        recovery.note_native_commit(scene)
     if captured:
         raise NativeEditError(
             f"{label} failed: {captured[0]}; inspect the scene before retrying"

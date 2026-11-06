@@ -18,17 +18,50 @@ from .host import registry
 from .runner import RunnerClient, RunnerError
 from .settings import Config, load_config
 
-GUIDE = """Work with a saved scene copy in the configured workspace. Start with app_status,
-app_capabilities, objects_list and tracks_list. Use IDs for ambiguous names. Inspect native
-Transform/Point/Box and finger channels before writing. Capture pose_snapshot for selected
-controls and scene_save for a whole native checkpoint; a pose snapshot is not a clip backup.
-motion_sample and motion_mirror create editable plans without modifying the scene. Apply
-plans with pose_apply_sequence. All frames and targets are validated before a native edit;
-solvers can change neighboring controls. Read back poses, sample inbetweens, and review PNG
-captures before claiming animation quality. File operations require absolute workspace paths.
-An uncertain write result must be inspected before retrying: relative offsets accumulate,
-native actions can toggle state, and Python has full application privileges. No automatic
-rollback or professional motion-quality guarantee is implied by a successful tool call.
+GUIDE = """Read cascadeur://scene for current native scene context. Work with a saved scene
+copy in the configured workspace. Start with app_status, app_capabilities, recovery_status,
+objects_list and tracks_list. Use exact IDs for ambiguous names. Inspect actual native
+behavior channels and constraints before editing. scene_save creates a native .casc backup;
+checkpoint_create captures bounded native recovery state. These differ from pose_snapshot
+and durable character_pose_snapshot, which preserve a selected pose rather than an entire clip.
+Durable character_pose_restore restores Point targets and validated finger-local rotations
+while retaining existing curve metadata and untouched authored keys. Independent linear-FK
+Joint subtrees use subtree_pose_read, subtree_snapshot, subtree_pose_apply and subtree_restore;
+their whole-clip snapshots preserve current unrelated edits. object_data_read and object_data_set
+expose exact owned native data IDs/display names, including data without behavior-property bindings.
+
+Discover RigInfo characters with characters_list and character_skeleton. rig_semantics
+validates the complete native Cascy Point profile; arbitrary rig_profile groups do not imply
+that validation. Body Joints are driven read-only outputs. Use character Point targets for
+body motion and hand_pose_read/hand_pose_apply_sequence for validated finger-local rotations.
+Palm Point movement does not curl fingers. Read character_edit_readiness before semantic
+editing; it is advisory and allocates no history. Ordinary semantic writes create LINEAR
+character keys. Use character_offset_preserving_curves or character_pose_preserving_curves
+for supported existing-key corrections that must retain authored key/curve metadata.
+character_retime handles native synchronized character keys; tracks_retime has a narrower
+independent-transform scope. Checked character writes need an allocated successor frame;
+the final stored terminal frame is read-only in the current native edit contract.
+
+motion_sample and motion_mirror create plans without native edits. Apply suitable batches
+with pose_apply_sequence, transforms_animate or the checked character tools. motion_measure
+reads actual native trajectories. native_mirror invokes rig-aware native mirroring. Native
+actions report dispatch, not successful completion. Select real track/frame intervals before
+interval physics or mirror actions. Solvers can change neighboring controls: read back poses,
+inspect edit-impact reports, sample inbetweens and review body/hand PNGs before claiming quality.
+
+Eligible model edits persist a request_id and recovery checkpoint before mutation. Inspect
+transaction_status after an uncertain response; never blindly retry relative edits or toggles.
+False native postconditions trigger checked rollback. recovery_status reports a persistent
+failed-recovery fence; reads and saving a NEW quarantine .casc remain available. Restarting
+does not unlock a changed quarantine. recovery_verify compares the complete recorded state;
+recovery_restore/checkpoint_restore must verify restoration before writes can continue.
+Full model recovery excludes opaque asset payloads and arbitrary Python's external side effects.
+
+Use playback_start/status/stop for bounded observed native playback. A timer observes frames,
+it never animates by repeated frame-setting. Stop only owned playback and verify the measured
+stop before editing. All file paths must be absolute and inside the configured workspace.
+Python is opt-in and has Cascadeur's full application privileges. Successful tool execution
+does not establish physical plausibility, contact quality or professional animation quality.
 """
 
 
@@ -131,6 +164,12 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
                 mimeType="text/plain",
             ),
             types.Resource(uri="cascadeur://tools", name="Tool contracts", mimeType="application/json"),
+            types.Resource(
+                uri="cascadeur://scene",
+                name="Current native scene",
+                description="Fresh active native scene, frame, bounds and selection through the local runner.",
+                mimeType="application/json",
+            ),
         ]
 
     @server.read_resource()
@@ -143,7 +182,56 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
                 for item in tools.values()
             ]
             return [ReadResourceContents(content=json.dumps(manifest), mime_type="application/json")]
+        if str(uri) == "cascadeur://scene":
+            payload = await asyncio.to_thread(connection.call, "scene_info", {})
+            return [
+                ReadResourceContents(
+                    content=json.dumps(payload["result"], allow_nan=False), mime_type="application/json"
+                )
+            ]
         raise ValueError("Unknown Cascadeur resource")
+
+    @server.list_prompts()
+    async def list_prompts():
+        return [
+            types.Prompt(
+                name="animate_character",
+                description="Inspect, checkpoint, author and verify native character animation from a brief.",
+                arguments=[
+                    types.PromptArgument(
+                        name="brief",
+                        required=True,
+                        description="Character, action, duration/FPS, reference and output requirements.",
+                    )
+                ],
+            )
+        ]
+
+    @server.get_prompt()
+    async def get_prompt(name, arguments):
+        if name != "animate_character":
+            raise ValueError("Unknown Cascadeur prompt")
+        if not isinstance(arguments, dict) or set(arguments) != {"brief"}:
+            raise ValueError("animate_character requires exactly the brief argument")
+        brief = arguments["brief"]
+        if not isinstance(brief, str) or not brief.strip() or len(brief) > 12000:
+            raise ValueError("brief must contain 1-12000 characters")
+        text = (
+            "Read cascadeur://guide and cascadeur://scene. Discover native capabilities, recovery state, "
+            "the character's actual RigInfo/Point/finger bindings and timeline. Save a new native scene "
+            "copy and capture a recovery checkpoint before editing. Plan key poses and timing for this brief:\n\n"
+            + brief
+            + "\n\n"
+            "Check readiness, author body Points first and validated finger-local poses separately. "
+            "Preserve authored curves when requested. Read actual solved poses, measure inbetweens, "
+            "observe native playback and review full-body and hand PNGs. Verify native save/reopen and "
+            "licensed exports. Report measured results and remaining visual limitations; retain request IDs "
+            "and inspect uncertain outcomes before retrying."
+        )
+        return types.GetPromptResult(
+            description="Native character animation with checked recovery and visual verification",
+            messages=[types.PromptMessage(role="user", content=types.TextContent(type="text", text=text))],
+        )
 
     return server
 

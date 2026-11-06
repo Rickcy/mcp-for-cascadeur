@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import URLError
@@ -165,3 +166,24 @@ def test_local_runner_redirect_is_not_followed(native_server):
         server.shutdown()
         server.server_close()
         worker.join()
+
+
+def test_native_runner_hard_timeout_preserves_receipt_id_and_never_replays_edit(monkeypatch):
+    client = RunnerClient()
+    submitted = []
+
+    def timeout(route, payload):
+        assert route == "/run"
+        submitted.append(re.search(r"request_id='([0-9a-f]{32})'", payload["code"]).group(1))
+        return {"ok": False, "error": "Timed out waiting for Cascadeur idle event", "messages": []}
+
+    monkeypatch.setattr(client, "_request", timeout)
+    with pytest.raises(RunnerError) as caught:
+        client.call("pose_offset", {"objects": ["point"], "frames": [0], "delta": [1, 0, 0]})
+    assert len(submitted) == 1
+    error = caught.value
+    assert error.code == "NATIVE_SCRIPT_FAILED"
+    assert error.execution_state == "unknown"
+    assert error.request_id == submitted[0]
+    assert "transaction_status" in str(error) and submitted[0] in str(error)
+    assert "may still be executing" in str(error)

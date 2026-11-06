@@ -67,9 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config()
         if command == "serve":
-            from . import server
+            from .server import main as serve
 
-            server.main(config)
+            serve(config)
             return 0
         if command == "tools":
             from .host import registry

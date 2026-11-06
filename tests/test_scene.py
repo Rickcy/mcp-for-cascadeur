@@ -74,12 +74,25 @@ def test_save_requires_explicit_overwrite(monkeypatch, tmp_path):
 
 
 def test_save_recognizes_fresh_nonempty_output(monkeypatch, tmp_path):
+    import hashlib
+
     target = tmp_path / "saved.casc"
     common.configure(tmp_path)
     context(monkeypatch, view=SimpleNamespace(save=lambda path: target.write_bytes(b"new scene")))
     result = scene.scene_save(str(target))
     assert result["verification"] == "fresh_file"
     assert result["bytes"] == 9
+    assert result["sha256"] == hashlib.sha256(b"new scene").hexdigest()
+
+
+@pytest.mark.parametrize("root", ["model", "layers"])
+def test_api_inspection_resolves_actual_native_scene_viewers(monkeypatch, root):
+    getter = Mock(return_value=SimpleNamespace(native_member=17))
+    native_scene = SimpleNamespace(**{root + "_viewer": getter})
+    context(monkeypatch, native_scene=native_scene)
+    result = inspection.api_inspect(root=root, path="native_member")
+    assert result["value"] == 17
+    getter.assert_called_once_with()
 
 
 def test_fbx_export_checks_native_license_before_tool_access(monkeypatch, tmp_path):
@@ -199,7 +212,9 @@ def test_object_inspection_returns_channels_and_references_with_bound(monkeypatc
         get_behaviour_object=lambda *_: NativeId("parent-id"),
     )
     reads = Mock(return_value=[1, 2, 3])
-    data = SimpleNamespace(get_data_value=reads)
+    data = SimpleNamespace(
+        get_data_value=reads, get_data=lambda _: SimpleNamespace(mode=SimpleNamespace(name="Animation"))
+    )
     model = SimpleNamespace(
         get_object_name=lambda _: "Hand", behaviour_viewer=lambda: behaviours, data_viewer=lambda: data
     )
@@ -234,3 +249,33 @@ def test_hierarchy_reports_native_parent_ids_without_recursing(monkeypatch):
     assert result["objects"] == [{"id": "a", "name": "a", "parent_id": "b"}]
     assert result["total"] == 2
     assert result["truncated"] is True
+
+
+@pytest.mark.parametrize("kind", ["DataType", "DataRangeType", "SettingType", "SettingRangeType"])
+@pytest.mark.parametrize("mode", ["Static", "Animation"])
+def test_property_inspection_uses_strict_native_mode_overloads(kind, mode):
+    calls = []
+
+    def read(identifier, *frames):
+        assert frames == (() if mode == "Static" else (5,))
+        calls.append((identifier, frames))
+        return 17
+
+    def descriptor(reference):
+        return SimpleNamespace(mode=SimpleNamespace(name=mode))
+
+    data = SimpleNamespace(
+        get_data=descriptor, get_setting=descriptor, get_data_value=read, get_setting_value=read
+    )
+    behaviors = SimpleNamespace(
+        get_property_type=lambda *_: SimpleNamespace(name=kind),
+        get_behaviour_data=lambda *_: "data",
+        get_behaviour_data_range=lambda *_: ["data"],
+        get_behaviour_data_subtype=lambda *_: "Int",
+        get_behaviour_setting=lambda *_: "setting",
+        get_behaviour_settings_range=lambda *_: ["setting"],
+        get_behaviour_setting_subtype=lambda *_: "Int",
+    )
+    result = inspection._property_record(behaviors, data, "behavior", "property", 5)
+    assert "unavailable" not in result
+    assert len(calls) == 1

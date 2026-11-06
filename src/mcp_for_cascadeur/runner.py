@@ -6,6 +6,7 @@ import ast
 import json
 import socket
 import threading
+import uuid
 from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -19,14 +20,31 @@ MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
 
 class RunnerError(RuntimeError):
-    def __init__(self, code: str, message: str, execution_state: str = "not_started", details=None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        execution_state: str = "not_started",
+        details=None,
+        request_id=None,
+        rollback_verified=None,
+    ):
         super().__init__(message)
         self.code = code
         self.execution_state = execution_state
         self.details = details
+        self.request_id = request_id
+        self.rollback_verified = rollback_verified
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "message": str(self), "execution_state": self.execution_state}
+        result = {"code": self.code, "message": str(self), "execution_state": self.execution_state}
+        if self.request_id is not None:
+            result["request_id"] = self.request_id
+        if self.rollback_verified is not None:
+            result["rollback_verified"] = self.rollback_verified
+        if self.details is not None:
+            result["details"] = self.details
+        return result
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -135,19 +153,31 @@ class RunnerClient:
                 "log": "",
                 "messages": [],
             }
+        request_id = uuid.uuid4().hex
         expression = (
             "__import__('json').dumps(__import__('mcp_for_cascadeur.host', fromlist=['dispatch'])"
             f".dispatch({name!r}, {arguments!r}, workspace={self.workspace!r}, "
-            f"allow_python={self.allow_python!r}, version={__version__!r}), allow_nan=False)"
+            f"allow_python={self.allow_python!r}, version={__version__!r}, request_id={request_id!r}), allow_nan=False)"
         )
-        with self._lock:
-            envelope = self._request("/run", {"code": expression})
+        try:
+            with self._lock:
+                envelope = self._request("/run", {"code": expression})
+        except RunnerError as error:
+            error.request_id = request_id
+            raise
         if envelope.get("ok") is not True:
+            message = str(envelope.get("error", "Script execution failed"))
+            if "timed out waiting for cascadeur idle event" in message.casefold():
+                message += (
+                    ". The native operation may still be executing. Read transaction_status with "
+                    f"request_id={request_id!r} before retrying; do not replay the edit automatically."
+                )
             raise RunnerError(
                 "NATIVE_SCRIPT_FAILED",
-                str(envelope.get("error", "Script execution failed")),
+                message,
                 "unknown",
                 envelope.get("messages"),
+                request_id=request_id,
             )
         try:
             payload = json.loads(ast.literal_eval(envelope["value"]))
@@ -155,16 +185,28 @@ class RunnerClient:
                 raise ValueError("Missing adapter response envelope")
         except (KeyError, TypeError, ValueError, SyntaxError, RecursionError) as error:
             raise RunnerError(
-                "INVALID_RESULT", "The native adapter returned an invalid result", "unknown"
+                "INVALID_RESULT",
+                "The native adapter returned an invalid result",
+                "unknown",
+                request_id=request_id,
             ) from error
         messages = envelope.get("messages", [])
+        if payload.get("request_id", request_id) != request_id:
+            raise RunnerError(
+                "INVALID_RESULT",
+                "The native response belongs to a different request",
+                "unknown",
+                request_id=request_id,
+            )
         if not payload["ok"]:
             error = payload.get("error", {})
             raise RunnerError(
                 error.get("code", "NATIVE_ERROR"),
                 error.get("message", "Native operation failed"),
                 error.get("execution_state", "unknown"),
-                payload,
+                error.get("details"),
+                request_id=error.get("request_id", request_id),
+                rollback_verified=error.get("rollback_verified"),
             )
         errors = [message for message in messages if message.get("level") == "Error"]
         if errors:
@@ -173,6 +215,7 @@ class RunnerClient:
                 "; ".join(str(item.get("text", "")) for item in errors)[-8000:],
                 "unknown",
                 payload,
+                request_id=request_id,
             )
         payload["messages"] = messages[-50:]
         return payload

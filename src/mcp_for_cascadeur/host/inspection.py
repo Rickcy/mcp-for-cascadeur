@@ -8,6 +8,7 @@ import sys
 
 from ..contracts import Tool
 from . import common
+from .data_channels import read_data_value, read_setting_value
 
 
 def _member_record(name, value):
@@ -58,9 +59,11 @@ def _describe(value, limit):
 
 def api_inspect(root="csc", path="", limit=40):
     csc, app, view, scene = common.current_context(require_scene=False)
-    roots = {"csc": csc, "app": app, "view": view, "scene": scene}
+    roots = {"csc": csc, "app": app, "view": view, "scene": scene, "model": None, "layers": None}
     if root not in roots:
-        raise ValueError("root must be csc, app, view or scene.")
+        raise ValueError("root must be csc, app, view, scene, model or layers.")
+    if scene is not None and root in ("model", "layers"):
+        roots[root] = scene.model_viewer() if root == "model" else scene.layers_viewer()
     if roots[root] is None:
         raise RuntimeError("Open a scene before inspecting this API root.")
     result = _describe(_public_path(roots[root], path), limit)
@@ -184,13 +187,13 @@ def _property_record(behaviours, data, behaviour_id, name, frame):
         result.update(
             data_id=str(channel),
             subtype=behaviours.get_behaviour_data_subtype(behaviour_id, name),
-            value=common.json_value(data.get_data_value(channel, frame)),
+            value=common.json_value(read_data_value(data, channel, frame)),
         )
     elif kind == "DataRangeType":
         channels = behaviours.get_behaviour_data_range(behaviour_id, name)
         result.update(
             data=[
-                {"id": str(channel), "value": common.json_value(data.get_data_value(channel, frame))}
+                {"id": str(channel), "value": common.json_value(read_data_value(data, channel, frame))}
                 for channel in channels[:100]
             ],
             total=len(channels),
@@ -200,13 +203,13 @@ def _property_record(behaviours, data, behaviour_id, name, frame):
         result.update(
             setting_id=str(setting),
             subtype=behaviours.get_behaviour_setting_subtype(behaviour_id, name),
-            value=common.json_value(data.get_setting_value(setting, frame)),
+            value=common.json_value(read_setting_value(data, setting, frame)),
         )
     elif kind == "SettingRangeType":
         settings = behaviours.get_behaviour_settings_range(behaviour_id, name)
         result.update(
             settings=[
-                {"id": str(setting), "value": common.json_value(data.get_setting_value(setting, frame))}
+                {"id": str(setting), "value": common.json_value(read_setting_value(data, setting, frame))}
                 for setting in settings[:100]
             ],
             total=len(settings),
@@ -310,7 +313,11 @@ TOOLS = [
         "api_inspect",
         "Read public native API members, signatures and documentation; does not invoke discovered methods.",
         api_inspect,
-        {"root": {"type": "string", "enum": ["csc", "app", "view", "scene"]}, "path": _PATH, "limit": _LIMIT},
+        {
+            "root": {"type": "string", "enum": ["csc", "app", "view", "scene", "model", "layers"]},
+            "path": _PATH,
+            "limit": _LIMIT,
+        },
     ),
     Tool(
         "native_tools_list",

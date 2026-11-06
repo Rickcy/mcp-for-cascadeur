@@ -6,6 +6,7 @@ import math
 
 from ..contracts import Tool
 from . import common
+from .action_catalog import ACTIONS
 
 
 def _scene_record(view, index=None):
@@ -99,11 +100,17 @@ def _file_result(path, before, mime_type=None):
 
 
 def scene_save(path, overwrite=False):
+    import hashlib
+
     destination = common.workspace_path(path, overwrite=overwrite, suffixes=(".casc",))
     _, _, view, _ = common.current_context()
     before = _stamp(destination)
     view.save(str(destination))
-    return _file_result(destination, before)
+    result = _file_result(destination, before)
+    if result["verification"] == "fresh_file":
+        with destination.open("rb") as stream:
+            result["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return result
 
 
 def selection_set(objects):
@@ -182,7 +189,7 @@ def camera_frame(objects, distance_scale=2.5):
         or not 1 <= distance_scale <= 20
     ):
         raise ValueError("distance_scale must be between 1 and 20.")
-    _, _, _, scene = common.current_context()
+    _, _, view, scene = common.current_context()
     model = scene.model_viewer()
     behaviours = model.behaviour_viewer()
     data = model.data_viewer()
@@ -198,14 +205,16 @@ def camera_frame(objects, distance_scale=2.5):
     low = [min(point[axis] for point in positions) for axis in range(3)]
     high = [max(point[axis] for point in positions) for axis in range(3)]
     center = [(left + right) / 2 for left, right in zip(low, high)]
-    radius = max(math.dist(low, high) / 2, 1.0)
-    camera = camera_get()
-    direction = [left - right for left, right in zip(camera["position"], camera["target"])]
-    norm = math.sqrt(sum(value * value for value in direction))
-    if norm < 1e-9:
-        direction, norm = [0, 0, 1], 1
-    result = camera_set([center[i] + direction[i] / norm * radius * distance_scale for i in range(3)], center)
-    result["framing"] = "Object Transform positions; mesh bounds are not measured."
+    padding = distance_scale / 2.5
+    points = [
+        [center[axis] + (point[axis] - center[axis]) * padding for axis in range(3)] for point in positions
+    ]
+    import numpy as np
+
+    _viewport(view).camera().zoom_to_points([np.asarray(point, dtype=np.float32) for point in points])
+    result = camera_get()
+    result["framing"] = "Native world-space framing of Transform positions; mesh bounds are not measured."
+    result["distance_scale"] = distance_scale
     return result
 
 
@@ -246,6 +255,8 @@ def viewport_capture(path, width=1280, height=720, samples=1, overwrite=False):
 
 
 def fbx_import(path, mode="scene", take=-1):
+    from . import recovery
+
     methods = {
         "scene": "import_scene",
         "animation": "import_animation",
@@ -257,13 +268,15 @@ def fbx_import(path, mode="scene", take=-1):
     if isinstance(take, bool) or not isinstance(take, int) or take < -1:
         raise ValueError("take must be -1 or a nonnegative take index.")
     destination = common.workspace_path(path, must_exist=True, suffixes=(".fbx",))
-    _, app, view, _ = common.current_context()
+    _, app, view, native_scene = common.current_context()
     loader = _native_tool(app, "FbxSceneLoader").get_fbx_loader(view)
     method = getattr(loader, methods[mode])
+    recovery.note_native_attempt(native_scene)
     if mode in ("scene", "animation"):
         method(str(destination), take)
     else:
         method(str(destination))
+    recovery.note_native_commit(native_scene)
     return {
         "path": str(destination),
         "mode": mode,
@@ -278,6 +291,7 @@ def fbx_export(path, mode="animation", overwrite=False):
         "animation": "export_joints",
         "scene": "export_all_objects",
         "selected_objects": "export_scene_selected_objects",
+        "selected_joints": "export_joints_selected",
         "selected_frames": "export_joints_selected_frames",
         "model": "export_model",
     }
@@ -313,6 +327,15 @@ ACTION_CATALOG = {
 }
 
 
+ACTION_CATALOG.update(
+    {
+        identifier: record["description"]
+        for identifier, record in ACTIONS.items()
+        if identifier not in ACTION_CATALOG
+    }
+)
+
+
 def actions_list(query=""):
     if not isinstance(query, str) or len(query) > 200:
         raise ValueError("query must be a string of at most 200 characters.")
@@ -320,7 +343,7 @@ def actions_list(query=""):
         "source": "https://cascadeur.com/help/category/301",
         "availability": "Documented IDs; this API does not enumerate runtime action availability.",
         "actions": [
-            {"id": name, "description": description}
+            {"id": name, "description": description, "category": ACTIONS.get(name, {}).get("category")}
             for name, description in ACTION_CATALOG.items()
             if query.casefold() in (name + " " + description).casefold()
         ],
@@ -328,13 +351,18 @@ def actions_list(query=""):
 
 
 def action_run(action_id, expected_scene):
+    from . import recovery
+
     if action_id not in ACTION_CATALOG:
         raise ValueError("Choose an exact action ID from actions_list.")
     _, app, view, scene = common.current_context()
     actual_path = view.get_path_name()
     if not expected_scene or expected_scene not in (actual_path, view.name()):
         raise ValueError("Active scene differs from expected_scene; refresh scene_info.")
+    recovery.note_native_attempt(scene)
     app.get_action_manager().call_action(action_id)
+    history_kind = {"Scene.Undo": "undo", "Scene.Redo": "redo"}.get(action_id, "modify")
+    recovery.note_native_commit(scene, kind=history_kind)
     return {
         "action_id": action_id,
         "dispatched": True,
@@ -450,7 +478,16 @@ TOOLS = [
         fbx_export,
         {
             "path": _TEXT,
-            "mode": {"enum": ["animation", "scene", "selected_objects", "selected_frames", "model"]},
+            "mode": {
+                "enum": [
+                    "animation",
+                    "scene",
+                    "selected_objects",
+                    "selected_joints",
+                    "selected_frames",
+                    "model",
+                ]
+            },
             "overwrite": _FLAG,
         },
         ("path",),

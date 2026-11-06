@@ -69,6 +69,8 @@ def _rotation(value):
 
 
 def _read(scene, object_id, frame, space):
+    from .data_channels import read_data_value
+
     data = scene.data_viewer()
     item = {"object": str(object_id), "name": scene.model_viewer().get_object_name(object_id)}
     for field, suffix in (("position", "position"), ("rotation_wxyz", "rotation")):
@@ -76,7 +78,7 @@ def _read(scene, object_id, frame, space):
             reference = _channel(scene, object_id, f"{space}_{suffix}")
         except ValueError:
             continue
-        value = data.get_data_value(reference, frame)
+        value = read_data_value(data, reference, frame)
         if field == "position":
             encoded = json_value(value)
             if (
@@ -215,17 +217,17 @@ def tracks_set_keys(tracks, frames, mode="insert", extend_timeline=False):
         raise ValueError("Keyframe positions must be unique")
     if mode not in ("insert", "delete"):
         raise ValueError("mode must be insert or delete")
+    expected_deleted_keys = {}
     if mode == "delete":
+        if 0 in positions:
+            raise ValueError("The initial frame 0 is protected from key deletion")
         for identifier in identifiers:
             existing = list(scene.layers_viewer().layer(identifier).key_frame_indices())
             if any(frame not in existing for frame in positions):
                 raise ValueError("Every deleted frame must be an existing key on every selected track")
-            if (
-                len(set(existing) - set(positions)) < 2
-                or existing[0] in positions
-                or existing[-1] in positions
-            ):
-                raise ValueError("Deletion must preserve the first and last keys and at least two keys")
+            if 0 not in set(existing) - set(positions):
+                raise ValueError("Deletion must retain an existing initial key at frame 0")
+            expected_deleted_keys[str(identifier)] = sorted(set(existing) - set(positions))
     elif positions[-1] >= _size(scene) and not extend_timeline:
         raise ValueError("New keys extend the animation; set extend_timeline=true explicitly")
 
@@ -244,6 +246,13 @@ def tracks_set_keys(tracks, frames, mode="insert", extend_timeline=False):
         updater.generate_update()
 
     modify(scene, "Insert animation keys" if mode == "insert" else "Delete animation keys", apply)
+    if mode == "delete":
+        actual = {
+            str(identifier): list(scene.layers_viewer().layer(identifier).key_frame_indices())
+            for identifier in identifiers
+        }
+        if actual != expected_deleted_keys:
+            raise RuntimeError("Native key deletion did not retain the expected frame-0/key layout")
     return {
         "mode": mode,
         "tracks": [str(item) for item in identifiers],
@@ -289,25 +298,21 @@ def tracks_set_interpolation(tracks, frames, interpolation):
     }
 
 
-def _copy_section(csc, source):
-    section = csc.layers.layer.Section()
-    section.key.common.ik_fk = source.key.common.ik_fk
-    section.key.common.fixation = source.key.common.fixation
-    section.key.tangents = source.key.tangents
-    section.key.label = source.key.label
-    section.key.left_weight_velocity = source.key.left_weight_velocity
-    section.key.right_weight_velocity = source.key.right_weight_velocity
-    section.interval.common.ik_fk = source.interval.common.ik_fk
-    section.interval.common.fixation = source.interval.common.fixation
-    section.interval.interpolation = source.interval.interpolation
-    section.interval.description_for_ai_interpolation = source.interval.description_for_ai_interpolation
-    return section
-
-
 def _copy_native(csc, value):
     if hasattr(value, "copy"):
         return value.copy()
     if hasattr(value, "to_quaternion"):
+        if callable(getattr(value, "to_euler_angles", None)) and callable(
+            getattr(csc.math.Rotation, "from_euler", None)
+        ):
+            angles = json_value(value.to_euler_angles())
+            if (
+                isinstance(angles, list)
+                and len(angles) == 3
+                and all(isinstance(item, list) and len(item) == 1 for item in angles)
+            ):
+                angles = [item[0] for item in angles]
+            return csc.math.Rotation.from_euler(*finite_vector(angles, 3))
         return csc.math.Rotation.from_quaternion(*_rotation(value))
     if all(callable(getattr(value, axis, None)) for axis in "wxyz"):
         return csc.math.Quaternion(*_rotation(value))
@@ -316,6 +321,8 @@ def _copy_native(csc, value):
 
 def tracks_retime(tracks, source_frames, target_frames):
     """Move synchronized interior keys while retaining their section metadata."""
+    from . import state
+
     csc, _, _, scene = current_context()
     identifiers = _tracks(scene, tracks)
     if (
@@ -333,19 +340,31 @@ def tracks_retime(tracks, source_frames, target_frames):
         raise ValueError("Retiming preserves the first and last key; keep their target frames unchanged")
     viewer, data = scene.layers_viewer(), scene.data_viewer()
     behaviors = scene.behaviour_viewer()
-    sections, values, settings = {}, {}, {}
+    sections, values, settings, global_poses = {}, {}, {}, {}
     for identifier in identifiers:
         track = viewer.layer(identifier)
         if list(track.key_frame_indices()) != source:
             raise ValueError("source_frames must list every key on every selected track")
         if csc.layers.CyclesViewer(track).get_cycles_in_frames(source[0], source[-1]):
             raise ValueError("Retiming cyclic tracks requires a dedicated cycle edit")
-        if any(section.interval.interpolation.name in ("FIXED", "AI") for section in track.sections.values()):
+        if sorted(track.sections) != source:
             raise ValueError(
-                "FIXED or AI intervals contain additional samples; bake/resample them explicitly first"
+                "Retiming requires only the listed key sections; fixed/non-key sections need explicit resampling"
             )
+        if any(
+            section.interval.interpolation.name not in ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP")
+            for section in track.sections.values()
+        ):
+            raise ValueError(
+                "Retiming supports LINEAR/BEZIER/LOW_AMPLITUDE_BEZIER/STEP; FIXED, AI and CLAMPED curves need a separately verified workflow"
+            )
+        if any(
+            section.key is None or section.key.tangents.name != "Continuous"
+            for section in track.sections.values()
+        ):
+            raise ValueError("Retiming custom spatial tangents or non-key sections is unsupported")
         sections[identifier] = {
-            destination: _copy_section(csc, track.section(original))
+            destination: state.section_state(track.section(original))
             for original, destination in zip(source, targets)
         }
         for obj in track.obj_ids:
@@ -358,11 +377,16 @@ def tracks_retime(tracks, source_frames, target_frames):
                 basic = behaviors.get_behaviour_by_name(obj, "Basic")
                 if not behaviors.get_behaviour_object(basic, "parent").is_null():
                     raise ValueError("Retiming parented transforms needs dependency-aware channel selection")
-            for reference in data.get_all_data_id(obj):
+            # Standalone transforms expose both authored local inputs and
+            # derived global/matrix outputs. Only re-author the local inputs;
+            # the native update graph must produce their world outputs.
+            for name in ("local_position", "local_rotation", "local_scale"):
+                reference = _channel(scene, obj, name)
                 if data.get_data(reference).mode == csc.model.DataMode.Animation:
                     values[reference] = [
                         _copy_native(csc, data.get_data_value(reference, frame)) for frame in source
                     ]
+            global_poses[obj] = [_read(scene, obj, frame, "global") for frame in source]
             for reference in data.get_all_settings_id(obj):
                 if data.get_setting(reference).mode == csc.model.SettingMode.Animation:
                     settings[reference] = [data.get_setting_value(reference, frame) for frame in source]
@@ -372,20 +396,50 @@ def tracks_retime(tracks, source_frames, target_frames):
     def apply(model, updater):
         editor, layer_editor = model.data_editor(), model.layers_editor()
         for identifier, replacements in sections.items():
-            layer_editor.set_sections(replacements, identifier)
-        for index, destination in enumerate(targets):
-            for reference, samples in values.items():
-                editor.set_data_value(reference, destination, samples[index])
-            for reference, samples in settings.items():
-                editor.set_setting_value(reference, destination, samples[index])
-            updater.run_update(set(values), destination)
+            for frame in list(viewer.layer(identifier).sections):
+                if frame not in replacements:
+                    layer_editor.unset_section(frame, identifier)
+            for frame, metadata in replacements.items():
+                if not viewer.layer(identifier).is_key(frame):
+                    layer_editor.set_fixed_interpolation_or_key_if_need(identifier, frame, True)
+
+                def restore(section, metadata=metadata):
+                    state.apply_section_metadata(section, metadata)
+
+                layer_editor.change_section(frame, identifier, restore)
         layer_editor.normalize_sections(scene)
         updater.generate_update()
+        interpolator = updater.get_interpolator()
+        interpolator.reload()
+        for index, destination in enumerate(targets):
+            changed = set()
+            setting_changed = False
+            for reference, samples in values.items():
+                if not _native_values_match(samples[index], data.get_data_value(reference, destination)):
+                    editor.set_data_value(reference, destination, samples[index])
+                    changed.add(reference)
+            for reference, samples in settings.items():
+                if samples[index] != data.get_setting_value(reference, destination):
+                    editor.set_setting_value(reference, destination, samples[index])
+                    setting_changed = True
+            if changed or setting_changed:
+                updater.run_update(changed or set(values), destination)
+        interpolator.interpolate()
 
     modify(scene, "Retime synchronized track keys", apply)
     actual_keys = {
         str(identifier): list(viewer.layer(identifier).key_frame_indices()) for identifier in identifiers
     }
+    metadata_verified = all(
+        {
+            position: state.section_state(section)
+            for position, section in viewer.layer(identifier).sections.items()
+        }
+        == expected
+        for identifier, expected in sections.items()
+    )
+    if not metadata_verified:
+        raise RuntimeError("Retimed native section metadata differs from the staged original keys")
     mismatches = []
     for reference, samples in values.items():
         for frame, expected in zip(targets, samples):
@@ -395,6 +449,17 @@ def tracks_retime(tracks, source_frames, target_frames):
         for frame, expected in zip(targets, samples):
             if expected != data.get_setting_value(reference, frame):
                 mismatches.append({"setting_id": str(reference), "frame": frame})
+    world_mismatches = []
+    for obj, samples in global_poses.items():
+        for frame, expected in zip(targets, samples):
+            actual = _read(scene, obj, frame, "global")
+            if "position" in expected and math.dist(expected["position"], actual["position"]) > 0.01:
+                world_mismatches.append({"object": str(obj), "frame": frame, "field": "position"})
+            if "rotation_wxyz" in expected:
+                dot = abs(sum(a * b for a, b in zip(expected["rotation_wxyz"], actual["rotation_wxyz"])))
+                if 2 * math.acos(min(1.0, dot)) > 0.001:
+                    world_mismatches.append({"object": str(obj), "frame": frame, "field": "rotation"})
+    mismatches.extend(world_mismatches)
     return {
         "execution_state": "completed",
         "source_frames": source,
@@ -402,6 +467,14 @@ def tracks_retime(tracks, source_frames, target_frames):
         "actual_keys": actual_keys,
         "key_mapping_verified": all(keys == targets for keys in actual_keys.values()),
         "channel_values_verified": not mismatches,
+        "section_metadata_verified": metadata_verified,
+        "world_poses_verified": not world_mismatches,
+        "authored_channels": [
+            "Transform.local_position",
+            "Transform.local_rotation",
+            "Transform.local_scale",
+            "animated settings",
+        ],
         "channel_mismatches": mismatches[:32],
         "channel_mismatch_count": len(mismatches),
         "preserved": ["key labels", "tangents", "velocity weights", "IK/FK", "fixation", "interpolation"],
@@ -477,6 +550,8 @@ def _coerce_property_value(csc, template, value):
 
 
 def object_properties_set(changes, frame=None, create_keys=False):
+    from .data_channels import read_data_value
+
     csc, _, _, scene = current_context()
     position = _existing_frame(scene, frame)
     if type(changes) is not list or not 1 <= len(changes) <= 256:
@@ -506,7 +581,7 @@ def object_properties_set(changes, frame=None, create_keys=False):
             and not layers.layer(layer_id).is_key(position)
         ):
             raise ValueError("Animated property writes require an existing key or create_keys=true")
-        template = data.get_data_value(reference, position)
+        template = read_data_value(data, reference, position)
         native = _coerce_property_value(csc, template, change["value"])
         plan.append((reference, layer_id, mode, native))
 
@@ -531,7 +606,7 @@ def object_properties_set(changes, frame=None, create_keys=False):
         "properties": [
             {
                 "data_id": str(reference),
-                "value": json_value(data.get_data_value(reference, position)),
+                "value": json_value(read_data_value(data, reference, position)),
                 "scope": "all frames" if mode == csc.model.DataMode.Static else "frame",
             }
             for reference, _, mode, _ in plan
@@ -691,7 +766,7 @@ def pose_apply_sequence(
         "object_samples": sum(len(entries) for _, entries in plan),
         "verification": verification,
         "observed": observed,
-        "note": "One native modification. Solvers may affect unedited controls. This is not a verified whole-scene rollback checkpoint.",
+        "note": "One native modification inside the caller's checked model transaction. Solvers may affect unedited controls.",
     }
 
 
@@ -905,7 +980,7 @@ TOOLS = [
     ),
     Tool(
         "tracks_set_keys",
-        "Insert keys on explicit unlocked tracks, or delete interior keys. Extending animation requires extend_timeline=true.",
+        "Insert keys on explicit unlocked tracks, or delete existing nonzero keys including the final key while retaining frame 0. Extending animation requires extend_timeline=true.",
         tracks_set_keys,
         {
             "tracks": OBJECTS,

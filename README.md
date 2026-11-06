@@ -1,9 +1,10 @@
 # MCP for Cascadeur
 
-Inspect rigs, edit controller animation and review the result through MCP.
-There are 49 structured tools, plus optional Python execution for the rest of
-Cascadeur's API. Control groups are user-defined and work with inspected native
-rigs rather than one hard-coded character layout.
+Inspect native rigs, author body and finger animation, preserve curve metadata,
+retime character keys and recover interrupted edits through MCP. Structured tools
+cover generic controllers and validated native character semantics. Optional
+Python execution exposes the rest of Cascadeur's API. The registry contains 95
+structured tools and the optional Python tool.
 
 The stdio process uses the official MCP Python SDK. Native operations run through
 the script runner shipped with Cascadeur, on its main thread. Setup copies this
@@ -71,7 +72,7 @@ For a downloaded wheel, keep the external tool installed and use its registered
 executable instead of a temporary package source:
 
 ```powershell
-uv tool install "C:\Downloads\mcp_for_cascadeur-0.1.0-py3-none-any.whl"
+uv tool install "C:\Downloads\mcp_for_cascadeur-0.2.0-py3-none-any.whl"
 uvx mcp-for-cascadeur setup --install-startup --local-tool
 ```
 
@@ -80,11 +81,13 @@ uvx mcp-for-cascadeur setup --install-startup --local-tool
 1. Read `app_status`, `app_capabilities`, `objects_list` and `tracks_list`.
 2. Use `object_inspect` to find actual body, hand and finger channels. IDs avoid
    ambiguous names. Bind convenient names using `rig_profile_create`.
-3. Save a native scene copy. `pose_snapshot` captures a selected pose, while
-   `scene_save` preserves a whole clip.
+3. Save a native scene copy and create a durable `checkpoint_create` before a
+   sequence of edits. Use `character_edit_readiness` to inspect exact blockers.
 4. Read poses, build keyframes, and preview a plan with `motion_sample` or
    `motion_mirror`. Plans contain ordinary JSON and do not edit the scene.
-5. Apply `pose_apply_sequence`. Timeline extension is explicit. Readback reports
+5. Use `character_offset_preserving_curves` for existing character keys,
+   `character_retime` for synchronized character timing, or `pose_apply_sequence`
+   for generic controller authoring. Timeline extension is explicit. Readback reports
    target error and solver adjustments; a successful write can still alter other
    controls. `position_tolerance` and `rotation_tolerance` explicitly set readback
    acceptance (scene units and radians); they do not change the native solver.
@@ -100,11 +103,13 @@ Tool groups:
 | Animation | Controller poses and batches, relative offsets, keys, interpolation, timeline bounds, typed behavior-property writes |
 | Motion plans | Easing, shortest-arc quaternion SLERP, reflection and object mapping |
 | Rig profiles | Named groups for body controls, hands, fingers or props; scene/topology validation |
-| Recovery | Selected-pose snapshots in memory or JSON; explicit restore and readback |
-| Review and exchange | Camera framing, viewport modes, fresh PNG images, FBX import/export with native license checks |
+| Characters | RigInfo ownership, semantic body groups, authored finger rotations, curve-preserving edits and synchronized retiming |
+| Recovery | Persistent pre-write journal, verified rollback, whole-model checkpoints, durable character poses and recovery fences |
+| Review and exchange | Native playback observation, camera framing, fresh PNG images, FBX import/export and staged hash-checked publication |
 | Advanced | Documented native actions and optional Python with `csc`, `app`, `view`, `scene`, `workspace` |
 
-The server also exposes `cascadeur://guide` and `cascadeur://tools` resources.
+The server exposes `cascadeur://guide`, `cascadeur://tools`, `cascadeur://scene`
+and an `animate_character` prompt.
 Run `mcp-for-cascadeur tools --json` from an installed tool environment to inspect
 all parameter contracts.
 
@@ -115,16 +120,25 @@ from a prompt. Physics, AutoPosing and retargeting menu actions report dispatch;
 the affected native tool, selection and license still determine the result.
 General Python execution has the same privileges as Cascadeur and is optional.
 
-Structured retiming currently supports standalone, unparented Basic/Transform
-objects. It rejects constrained rig tracks rather than treating derived global
-channels as independent authored channels. Use inspected native actions or Python
-for rig-specific retiming. Pose writes support native Transform channels, including
-controller and finger channels; solvers may adjust requested targets.
+`tracks_retime` handles standalone transforms. `character_retime` uses authored
+Point positions, validated finger-local rotations and native settings; driven
+Joint outputs are solved and checked. Its bounded contract requires synchronized
+keys and supported interpolation. Curve-preserving tools retain section metadata
+and protect unrelated channels; solver-coupled movement is reported separately.
 
-Pose snapshots do not preserve curve metadata or an entire clip. Native Undo is
-not advertised as a verified rollback mechanism. After a timeout or lost native
-connection, the write outcome is unknown: read back before retrying a relative
-edit or action. Keep the vendor HTTP runner bound to loopback.
+Checked model edits persist a full bounded checkpoint before mutation. Failure
+triggers checked Undo and a guarded manual restoration fallback. A failed or
+interrupted recovery blocks writes across native process restarts until the full
+recorded model is verified. Read-only diagnostics and saving a new quarantine copy
+remain available. There is no force-unlock operation.
+
+After a timeout, inspect `transaction_status` using the returned request ID and
+read the actual scene before retrying. The native runner has a 30-second request
+deadline. Arbitrary external Python side effects and opaque asset payload edits
+are outside model rollback. Keep the vendor HTTP runner bound to loopback.
+
+See [capability contracts](docs/capabilities.md) and [measured native acceptance](docs/validation.md)
+for bounds, rejected curve states and tested behavior.
 
 ## Updating and removal
 

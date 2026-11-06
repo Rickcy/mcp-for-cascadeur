@@ -13,6 +13,12 @@ class NativeId(str):
         return self == ""
 
 
+class NativeEnum(str):
+    @property
+    def name(self):
+        return str(self)
+
+
 class NativeRotation:
     def __init__(self, *values):
         self.values = values
@@ -33,12 +39,42 @@ class NativeRotation:
         return self.values[3]
 
 
+def test_staged_native_rotation_preserves_euler_turns_and_branch_without_quaternion_roundtrip():
+    angles = (2 * math.pi + 0.25, -3 * math.pi / 2, 5 * math.pi)
+    original = SimpleNamespace(
+        to_euler_angles=lambda: [[value] for value in angles],
+        to_quaternion=lambda: pytest.fail(
+            "Staging Euler rotations must retain their original representation"
+        ),
+    )
+    copied = []
+
+    def from_euler(*values):
+        value = SimpleNamespace(angles=values)
+        copied.append(value)
+        return value
+
+    csc = SimpleNamespace(math=SimpleNamespace(Rotation=SimpleNamespace(from_euler=from_euler)))
+    staged = animation._copy_native(csc, original)
+    assert staged.angles == angles
+    assert staged is not original and copied == [staged]
+
+
+def test_staged_rotation_uses_quaternion_fallback_only_when_euler_api_is_unavailable():
+    original = NativeRotation(1.0, 0.0, 0.0, 0.0)
+    csc = SimpleNamespace(math=SimpleNamespace(Rotation=SimpleNamespace(from_quaternion=NativeRotation)))
+    staged = animation._copy_native(csc, original)
+    assert staged is not original and staged.values == original.values
+
+
 class DataViewer:
     def __init__(self):
         self.size = 8
         self.values = {("position", frame): [0.0, 1.0, 2.0] for frame in range(8)}
         self.values.update({("rotation", frame): NativeRotation(1, 0, 0, 0) for frame in range(8)})
-        self.modes = {"position": "animated", "rotation": "animated"}
+        self.values.update({("scale", frame): [1.0, 1.0, 1.0] for frame in range(8)})
+        self.values.update({("derived-output", frame): "native-owned-cache" for frame in range(8)})
+        self.modes = {name: "animated" for name in ("position", "rotation", "scale", "derived-output")}
         self.settings = {("enabled", frame): frame >= 4 for frame in range(8)}
 
     def get_animation_size(self):
@@ -47,8 +83,12 @@ class DataViewer:
     def get_data(self, identifier):
         return SimpleNamespace(mode=self.modes[identifier])
 
-    def get_data_value(self, identifier, frame):
-        return self.values[identifier, frame]
+    def get_data_value(self, identifier, *frames):
+        if self.modes[identifier] == "static":
+            assert not frames, "Native Static getter does not accept a frame"
+            return self.values[identifier, 0]
+        assert len(frames) == 1, "Native Animation getter requires a frame"
+        return self.values[identifier, frames[0]]
 
     def get_all_data_id(self, identifier):
         return [NativeId(name) for name in self.modes]
@@ -67,8 +107,15 @@ class DataEditor:
     def __init__(self, viewer):
         self.viewer = viewer
 
-    def set_data_value(self, identifier, frame, value):
-        self.viewer.values[identifier, frame] = value
+    def set_data_value(self, identifier, *arguments):
+        assert identifier != "derived-output", "Derived output channels must never be directly re-authored"
+        if self.viewer.modes[identifier] == "static":
+            assert len(arguments) == 1
+            for frame in range(self.viewer.size):
+                self.viewer.values[identifier, frame] = copy.deepcopy(arguments[0])
+        else:
+            assert len(arguments) == 2
+            self.viewer.values[identifier, arguments[0]] = arguments[1]
 
     def set_setting_value(self, identifier, frame, value):
         self.viewer.settings[identifier, frame] = value
@@ -81,6 +128,8 @@ class BehaviourViewer:
         return NativeId(name.lower()) if name in ("Transform", "Basic") else NativeId("")
 
     def get_behaviour_data(self, behavior, property_name):
+        if property_name.endswith("scale"):
+            return NativeId("scale")
         return NativeId("position" if property_name.endswith("position") else "rotation")
 
     def get_behaviours(self, identifier):
@@ -110,15 +159,15 @@ class ModelViewer:
 class NativeSection:
     def __init__(self):
         self.key = SimpleNamespace(
-            common=SimpleNamespace(ik_fk="FK", fixation="Free"),
-            tangents="Continuous",
+            common=SimpleNamespace(ik_fk=NativeEnum("FK"), fixation=NativeEnum("Free")),
+            tangents=NativeEnum("Continuous"),
             label=None,
             left_weight_velocity=1.25,
             right_weight_velocity=2.5,
         )
         self.interval = SimpleNamespace(
-            common=SimpleNamespace(ik_fk="FK", fixation="Free"),
-            interpolation=SimpleNamespace(name="LINEAR"),
+            common=SimpleNamespace(ik_fk=NativeEnum("FK"), fixation=NativeEnum("Free")),
+            interpolation=NativeEnum("LINEAR"),
             description_for_ai_interpolation="",
         )
 
@@ -187,14 +236,25 @@ class Scene:
                     )
             self.data.size = self.requested_size
 
-        def set_sections(sections, identifier):
-            self.layers.track.sections = dict(sections)
+        def unsafe_set_sections(*arguments):
+            raise AssertionError("Detached native Section-map replacement must never be used")
+
+        def unset_section(frame, identifier):
+            self.events.append(("unset", frame))
+            del self.layers.track.sections[frame]
+            self.requested_size = max(self.layers.track.sections) + 1
+
+        def change_section(frame, identifier, callback):
+            self.events.append(("metadata", frame))
+            callback(self.layers.track.sections[frame])
 
         layer_editor = SimpleNamespace(
             normalize_sections=lambda scene: None,
             set_fixed_interpolation_or_key_if_need=insert_key,
             set_section=raw_endpoint,
-            set_sections=set_sections,
+            set_sections=unsafe_set_sections,
+            unset_section=unset_section,
+            change_section=change_section,
         )
         self.editor = SimpleNamespace(
             data_editor=lambda: DataEditor(self.data),
@@ -204,6 +264,10 @@ class Scene:
         self.updater = SimpleNamespace(
             run_update=lambda ids, frame: self.updates.append((ids, frame)),
             generate_update=lambda: self.events.append(("generate", self.data.size)),
+            get_interpolator=lambda: SimpleNamespace(
+                reload=lambda: self.events.append(("reload",)),
+                interpolate=lambda: self.events.append(("interpolate",)),
+            ),
         )
 
     def data_viewer(self):
@@ -240,12 +304,24 @@ def native(monkeypatch):
             Quaternion=lambda *values: NativeRotation(*values),
         ),
         layers=SimpleNamespace(
-            layer=SimpleNamespace(Section=NativeSection),
+            layer=SimpleNamespace(
+                Section=NativeSection,
+                Interpolation=SimpleNamespace(
+                    __members__={
+                        name: NativeEnum(name)
+                        for name in ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP")
+                    }
+                ),
+                IkFk=SimpleNamespace(__members__={"FK": NativeEnum("FK")}),
+                Fixation=SimpleNamespace(__members__={"Free": NativeEnum("Free")}),
+                Tangents=SimpleNamespace(__members__={"Continuous": NativeEnum("Continuous")}),
+            ),
             CyclesViewer=lambda track: SimpleNamespace(get_cycles_in_frames=lambda first, last: []),
         ),
     )
     view = SimpleNamespace(name=lambda: "Test", get_path_name=lambda: "C:/work/test.casc")
     monkeypatch.setattr(animation, "current_context", lambda: (csc, None, view, scene))
+    monkeypatch.setitem(sys.modules, "csc", csc)
     monkeypatch.setitem(
         sys.modules, "numpy", SimpleNamespace(asarray=lambda value, dtype: list(value), float32=float)
     )
@@ -350,6 +426,25 @@ def test_property_batch_checks_all_value_types_before_writing(native):
     assert scene.data.values["position", 0] == 2.5
 
 
+def test_pose_read_includes_static_rotation_without_native_animation_overload(native):
+    scene, _, _ = native
+    scene.data.modes["rotation"] = "static"
+    result = animation.pose_read(["Hand"], frame=4)
+    assert result["poses"][0]["rotation_wxyz"] == [1.0, 0.0, 0.0, 0.0]
+
+
+def test_static_behavior_property_template_and_readback_use_native_static_overload(native):
+    scene, _, _ = native
+    scene.data.modes["position"] = "static"
+    scene.data.values["position", 0] = 2.5
+    result = animation.object_properties_set(
+        [{"object": "Hand", "behavior": "Transform", "property": "global_position", "value": 3.75}], frame=4
+    )
+    assert result["properties"][0]["value"] == 3.75
+    assert result["properties"][0]["scope"] == "all frames"
+    assert all(scene.data.values["position", frame] == 3.75 for frame in range(scene.data.size))
+
+
 def test_extension_allocates_and_generates_before_native_key_helpers(native):
     scene, _, _ = native
     result = animation.tracks_set_keys(["track-uuid"], [0, 12, 24], extend_timeline=True)
@@ -380,6 +475,109 @@ def test_retime_preserves_settings_key_metadata_and_authored_values(native):
     assert scene.data.values["position", 3] == [4, 5, 6]
     assert scene.data.settings["enabled", 3] is True
     assert result["key_mapping_verified"] and result["channel_values_verified"]
+    assert result["section_metadata_verified"] is True
+    assert ("unset", 4) in scene.events
+    assert ("key", 3) in scene.events
+    assert ("interpolate",) == scene.events[-1]
+    assert not any(frame == 7 for _, frame in scene.updates)
+
+
+def test_delete_final_key_can_leave_only_the_protected_initial_key(native):
+    scene, _, _ = native
+    result = animation.tracks_set_keys(["track-uuid"], [4, 7], mode="delete")
+    assert scene.layers.track.key_frame_indices() == [0]
+    assert result["stored_frames"] == 1
+    assert scene.modify_calls == 1
+    assert scene.events[:2] == [("unset", 4), ("unset", 7)]
+
+
+def test_delete_initial_key_never_enters_native_transaction(native):
+    scene, _, _ = native
+    with pytest.raises(ValueError, match="frame 0 is protected"):
+        animation.tracks_set_keys(["track-uuid"], [0, 7], mode="delete")
+    assert scene.modify_calls == 0
+    assert scene.layers.track.key_frame_indices() == [0, 4, 7]
+
+
+def test_key_deletion_validates_all_tracks_before_mutating_any(native):
+    scene, _, _ = native
+    first, second = scene.layers.track, Track()
+    del second.sections[7]
+    scene.layers.all_layer_ids = lambda: [NativeId("track-uuid"), NativeId("second-track")]
+    scene.layers.layer = lambda identifier: first if str(identifier) == "track-uuid" else second
+    with pytest.raises(ValueError, match="every selected track"):
+        animation.tracks_set_keys(["track-uuid", "second-track"], [7], mode="delete")
+    assert scene.modify_calls == 0
+    assert first.key_frame_indices() == [0, 4, 7]
+
+
+@pytest.mark.parametrize("interpolation", ["CLAMPED_BEZIER", "FIXED", "AI", "NONE"])
+def test_retime_rejects_unverified_curve_reconstruction_before_native_changes(native, interpolation):
+    scene, _, _ = native
+    scene.layers.track.sections[4].interval.interpolation = NativeEnum(interpolation)
+    with pytest.raises(ValueError, match="separately verified"):
+        animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+    assert scene.modify_calls == 0
+
+
+def test_retime_moves_plain_metadata_with_no_detached_native_section_maps(native):
+    scene, _, _ = native
+    section = scene.layers.track.sections[4]
+    section.key.label = "authored middle key"
+    section.key.left_weight_velocity = 0.23
+    section.key.right_weight_velocity = 0.71
+    result = animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+    moved = scene.layers.track.sections[3]
+    assert moved.key.label == "authored middle key"
+    assert moved.key.left_weight_velocity == 0.23
+    assert moved.key.right_weight_velocity == 0.71
+    assert result["section_metadata_verified"] is True
+
+
+def test_retime_authors_only_local_transform_inputs_and_leaves_derived_data_to_native_graph(native):
+    scene, _, _ = native
+    scene.data.values["scale", 4] = [2.0, 3.0, 4.0]
+    scene.data.values["position", 4] = [7.0, 8.0, 9.0]
+    original_derived = [scene.data.values["derived-output", frame] for frame in range(8)]
+    result = animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+    assert scene.data.values["scale", 3] == [2.0, 3.0, 4.0]
+    assert scene.data.values["position", 3] == [7.0, 8.0, 9.0]
+    assert [scene.data.values["derived-output", frame] for frame in range(8)] == original_derived
+    assert result["world_poses_verified"] is True
+    assert "Transform.local_scale" in result["authored_channels"]
+
+
+def test_retime_rejects_incorrect_native_world_output_even_when_authored_data_matches(native):
+    scene, _, _ = native
+    original = animation._read
+
+    def stale_global(native_scene, object_id, frame, space):
+        value = original(native_scene, object_id, frame, space)
+        if scene.modify_calls and frame == 3:
+            value["position"] = [999.0, 0.0, 0.0]
+        return value
+
+    # This fake keeps authored storage correct while returning a bad derived
+    # world result after native commit, which must fail the outer receipt check.
+    from unittest.mock import patch
+
+    with patch.object(animation, "_read", stale_global):
+        result = animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+    assert result["world_poses_verified"] is False
+    assert result["channel_values_verified"] is False
+
+
+def test_retime_cannot_report_success_after_native_metadata_loss(native):
+    scene, _, _ = native
+
+    def interpolator_corrupts_label():
+        scene.layers.track.sections[3].key.label = "lost"
+
+    scene.updater.get_interpolator = lambda: SimpleNamespace(
+        reload=lambda: None, interpolate=interpolator_corrupts_label
+    )
+    with pytest.raises(RuntimeError, match="section metadata differs"):
+        animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
 
 
 def test_retime_rejects_parent_dependencies_before_modifying(native):
