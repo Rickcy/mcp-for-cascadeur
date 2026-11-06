@@ -37,6 +37,8 @@ connection to the native application.
 | Cascy roundtrip | Seven sampled poses, selected-pose restoration, PNG, native save/reopen and all 43 Point controls checked again after loading. Maximum reopened error `0.001039`, against an explicit `0.002` scene-unit tolerance. |
 | Rig profiles | Body group bound to 43 native IDs; profile and grouped pose read both work after reopening the saved scene. |
 | Finger controller | Right thumb Box controller rotated 15 degrees in local space, read back, then restored to its original quaternion. |
+| FBX export | Native animation export produced a fresh 677,664-byte FBX under the tested installation's export entitlement. Import into another application is not covered by this check. |
+| Forced disk reload | A uniquely named copy of the saved Cascy file loaded through the native parser; frames 0, 12 and 24 read back with maximum position error `0.000933`. |
 
 Sampling that Cascy motion at seven frames produced a maximum solver residual of
 approximately `0.001039` scene units, just above the default `0.001` readback
@@ -69,3 +71,5 @@ uv run python examples/native_smoke.py --sample Cascy
 Each run creates a new validation directory inside the configured workspace,
 opens a copy of the selected installed sample, and records a JSON report beside
 the `.casc`, selected-pose JSON and PNG outputs. It never edits the vendor sample.
+The saved scene is copied to a new path before loading, so an already-open tab
+cannot substitute for reading the saved file.

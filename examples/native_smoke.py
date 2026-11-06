@@ -104,10 +104,12 @@ async def check_sample(sample: str, render: bool) -> dict:
                 report["image"] = image
             saved = await call("scene_save", path=str(output / "motion.casc"))
             report["saved"] = saved
+            reopened_path = output / "reopened.casc"
+            shutil.copy2(output / "motion.casc", reopened_path)
+            await call("scene_open", path=str(reopened_path))
             profile_name = "smoke-" + str(time.time_ns())
             await call("rig_profile_create", name=profile_name, roles={"body": controls})
             await call("rig_pose_read", profile=profile_name, roles=["body"], frame=12)
-            await call("scene_open", path=str(output / "motion.casc"))
             reopened = await call("pose_read_sequence", objects=controls, frames=[0, 12, 24])
             report["reopened_frames"] = [entry["frame"] for entry in reopened["keyframes"]]
             expected_by_frame = {
