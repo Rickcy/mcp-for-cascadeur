@@ -6,7 +6,7 @@ application's installed samples. No sample assets are distributed here.
 
 ## Python and distribution checks
 
-The feature targets cover contracts, HTTP transport, official MCP SDK stdio,
+The 132 feature tests cover contracts, HTTP transport, official MCP SDK stdio,
 settings, installation, scene tools, animation, motion math and rig profiles.
 They include invalid nested inputs, unknown write outcomes, swallowed native
 callback errors, metadata preservation and timeline allocation order.
@@ -34,6 +34,9 @@ connection to the native application.
 | Cube pose readback | Maximum position error approximately `0.000011` scene units. |
 | Cascy controllers | All 43 native Point controllers read and written on the original frame; maximum position error approximately `0.000933`. |
 | Cascy timeline extension | Three poses at frames 0, 12 and 24, with a rigid group translation of 15 scene units; native readback matches within `0.001`. |
+| Cascy roundtrip | Seven sampled poses, selected-pose restoration, PNG, native save/reopen and all 43 Point controls checked again after loading. Maximum reopened error `0.001039`, against an explicit `0.002` scene-unit tolerance. |
+| Rig profiles | Body group bound to 43 native IDs; profile and grouped pose read both work after reopening the saved scene. |
+| Finger controller | Right thumb Box controller rotated 15 degrees in local space, read back, then restored to its original quaternion. |
 
 Sampling that Cascy motion at seven frames produced a maximum solver residual of
 approximately `0.001039` scene units, just above the default `0.001` readback

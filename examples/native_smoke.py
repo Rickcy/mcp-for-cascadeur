@@ -33,13 +33,13 @@ async def check_sample(sample: str, render: bool) -> dict:
             initialized = await session.initialize()
             report["server"] = initialized.serverInfo.model_dump()
 
-            async def call(name: str, **arguments):
-                response = await session.call_tool(name, arguments)
+            async def call(tool_name: str, **arguments):
+                response = await session.call_tool(tool_name, arguments)
                 payload = response.structuredContent
                 if response.isError:
-                    raise RuntimeError(f"{name}: {payload}")
-                report["checks"].append(name)
-                print(name, flush=True)
+                    raise RuntimeError(f"{tool_name}: {payload}")
+                report["checks"].append(tool_name)
+                print(tool_name, flush=True)
                 return payload["result"]
 
             await call("app_status")
@@ -80,7 +80,7 @@ async def check_sample(sample: str, render: bool) -> dict:
             )
             report["pose_verification"] = applied["verification"]
             if not applied["verification"]["matches"]:
-                raise RuntimeError("Native pose readback did not match the requested targets")
+                raise RuntimeError(f"Native pose readback exceeded its tolerance: {applied['verification']}")
             restored = await call(
                 "pose_restore",
                 snapshot_id=snapshot["snapshot_id"],
