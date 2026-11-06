@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-for-cascadeur"
+version = "0.1.0"
+description = "Animation tools and a local MCP connection for Cascadeur"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Eugene Kudenko" }]
+dependencies = ["mcp>=1.28,<2", "tomlkit>=0.13,<1"]
+
+[project.urls]
+Repository = "https://github.com/Rickcy/mcp-for-cascadeur"
+Issues = "https://github.com/Rickcy/mcp-for-cascadeur/issues"
+
+[project.scripts]
+mcp-for-cascadeur = "mcp_for_cascadeur.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12,<1", "build>=1,<2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_for_cascadeur"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
