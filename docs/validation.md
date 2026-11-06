@@ -20,6 +20,10 @@ The registry contains 50 tools; the server exposes 49 when Python is disabled.
 CI runs Python checks on Windows and Linux with Python 3.11 and 3.12. It does not
 install Cascadeur and is not evidence of native support on Linux.
 
+The initial branch's four hosted matrix jobs completed successfully. Motion
+planning, reflection and the documented action catalog also work without a
+connection to the native application.
+
 ## Native checks
 
 | Check | Observed result |
@@ -30,6 +34,12 @@ install Cascadeur and is not evidence of native support on Linux.
 | Cube pose readback | Maximum position error approximately `0.000011` scene units. |
 | Cascy controllers | All 43 native Point controllers read and written on the original frame; maximum position error approximately `0.000933`. |
 | Cascy timeline extension | Three poses at frames 0, 12 and 24, with a rigid group translation of 15 scene units; native readback matches within `0.001`. |
+
+Sampling that Cascy motion at seven frames produced a maximum solver residual of
+approximately `0.001039` scene units, just above the default `0.001` readback
+tolerance. The native smoke example explicitly uses `0.002` for Cascy and records
+the chosen tolerance. Changing this parameter affects the reported match flag,
+not the written targets or solver behavior.
 
 The first development test exposed an invalid native allocation order: creating
 fixed keys outside stored frames could abort the application. Extension now

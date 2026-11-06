@@ -67,6 +67,14 @@ Use an absolute path to `uvx` if your desktop client cannot find it. Settings an
 the stable host runtime live in the user's application-data directory under
 `mcp-for-cascadeur`. `MCP_FOR_CASCADEUR_HOME` overrides this location.
 
+For a downloaded wheel, keep the external tool installed and use its registered
+executable instead of a temporary package source:
+
+```powershell
+uv tool install "C:\Downloads\mcp_for_cascadeur-0.1.0-py3-none-any.whl"
+uvx mcp-for-cascadeur setup --install-startup --local-tool
+```
+
 ## Animation workflow
 
 1. Read `app_status`, `app_capabilities`, `objects_list` and `tracks_list`.
@@ -78,7 +86,8 @@ the stable host runtime live in the user's application-data directory under
    `motion_mirror`. Plans contain ordinary JSON and do not edit the scene.
 5. Apply `pose_apply_sequence`. Timeline extension is explicit. Readback reports
    target error and solver adjustments; a successful write can still alter other
-   controls.
+   controls. `position_tolerance` and `rotation_tolerance` explicitly set readback
+   acceptance (scene units and radians); they do not change the native solver.
 6. Sample inbetweens, capture body and hand views, and reopen a saved `.casc`.
    Check contacts, silhouettes and exported animation in the receiving app.
 

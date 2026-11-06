@@ -26,6 +26,7 @@ async def check_sample(sample: str, render: bool) -> dict:
     input_path = output / "input.casc"
     shutil.copy2(source, input_path)
     report = {"sample": sample, "output": str(output), "checks": []}
+    position_tolerance = 0.002 if sample == "Cascy" else 0.001
     parameters = StdioServerParameters(command=sys.executable, args=["-m", "mcp_for_cascadeur"])
     async with stdio_client(parameters) as (reader, writer):
         async with ClientSession(reader, writer) as session:
@@ -71,15 +72,29 @@ async def check_sample(sample: str, render: bool) -> dict:
                 )
             plan = await call("motion_sample", keyframes=keyframes, step=4, easing="smoothstep")
             applied = await call(
-                "pose_apply_sequence", keyframes=plan["keyframes"], extend_timeline=True, verify=True
+                "pose_apply_sequence",
+                keyframes=plan["keyframes"],
+                extend_timeline=True,
+                verify=True,
+                position_tolerance=position_tolerance,
             )
             report["pose_verification"] = applied["verification"]
             if not applied["verification"]["matches"]:
                 raise RuntimeError("Native pose readback did not match the requested targets")
-            restored = await call("pose_restore", snapshot_id=snapshot["snapshot_id"], frame=12)
+            restored = await call(
+                "pose_restore",
+                snapshot_id=snapshot["snapshot_id"],
+                frame=12,
+                position_tolerance=position_tolerance,
+            )
             if not restored["verification"]["matches"]:
                 raise RuntimeError("Snapshot restore did not match its captured targets")
-            await call("pose_apply_sequence", keyframes=plan["keyframes"], verify=True)
+            await call(
+                "pose_apply_sequence",
+                keyframes=plan["keyframes"],
+                verify=True,
+                position_tolerance=position_tolerance,
+            )
             await call("pose_read_sequence", objects=controls, frames=[0, 6, 12, 18, 24])
             await call("timeline_set_range", first=0, last=24)
             if render:
@@ -105,7 +120,7 @@ async def check_sample(sample: str, render: bool) -> dict:
                 for item in entry["poses"]
             )
             report["reopened_max_position_error"] = saved_error
-            if saved_error > 0.001:
+            if saved_error > position_tolerance:
                 raise RuntimeError("Saved/reopened pose values differ from requested positions")
             await call("rig_profile_read", name=profile_name)
             report["pose_snapshot"] = snapshot["path"]

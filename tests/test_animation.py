@@ -1,4 +1,5 @@
 import copy
+import math
 import sys
 from types import SimpleNamespace
 
@@ -416,3 +417,67 @@ def test_solver_failure_reports_exact_stage_and_unknown_native_outcome(native):
     assert failure.value.execution_state == "unknown"
     assert scene.modify_calls == 1
     assert scene.data.values["position", 0] == [3, 4, 5]
+
+
+def test_position_tolerance_changes_verification_without_changing_native_targets(native):
+    scene, _, _ = native
+
+    def native_precision(changed, frame):
+        scene.data.values["position", frame][0] += 0.0015
+
+    scene.updater.run_update = native_precision
+    keyframes = [{"frame": 0, "poses": [{"object": "Hand", "position": [3, 4, 5]}]}]
+    strict = animation.pose_apply_sequence(keyframes)
+    accepted = animation.pose_apply_sequence(keyframes, position_tolerance=0.002)
+    assert strict["verification"]["matches"] is False
+    assert strict["verification"]["position_tolerance"] == 0.001
+    assert accepted["verification"]["matches"] is True
+    assert accepted["verification"]["position_tolerance"] == 0.002
+    assert math.isclose(accepted["verification"]["max_position_error"], 0.0015, rel_tol=1e-6)
+    assert strict["observed"] == accepted["observed"]
+
+
+def test_rotation_tolerance_is_an_angle_in_radians(native):
+    scene, _, _ = native
+
+    def native_precision(changed, frame):
+        scene.data.values["rotation", frame] = NativeRotation(
+            math.cos(0.0015 / 2), 0, math.sin(0.0015 / 2), 0
+        )
+
+    scene.updater.run_update = native_precision
+    pose = [{"object": "Hand", "rotation_wxyz": [1, 0, 0, 0]}]
+    strict = animation.pose_apply(pose)
+    accepted = animation.pose_apply(pose, rotation_tolerance=0.002)
+    assert strict["verification"]["matches"] is False
+    assert accepted["verification"]["matches"] is True
+    assert accepted["verification"]["rotation_tolerance_radians"] == 0.002
+    assert math.isclose(accepted["verification"]["max_rotation_error_radians"], 0.0015, rel_tol=1e-6)
+    assert strict["observed"] == accepted["observed"]
+
+
+@pytest.mark.parametrize("field", ["position_tolerance", "rotation_tolerance"])
+@pytest.mark.parametrize("value", [0, -0.1, 1.001, float("nan"), float("inf"), True])
+def test_tolerance_validation_precedes_native_writes(native, field, value):
+    scene, _, _ = native
+    with pytest.raises(ValueError, match=field):
+        animation.pose_apply([{"object": "Hand", "position": [3, 4, 5]}], **{field: value})
+    assert scene.modify_calls == 0
+
+
+def test_restore_forwards_explicit_verification_tolerances(native):
+    scene, _, _ = native
+    snapshot = animation.pose_snapshot(["Hand"])
+    scene.data.values["position", 0] = [100, 0, 0]
+
+    def native_precision(changed, frame):
+        scene.data.values["position", frame][0] += 0.0015
+
+    scene.updater.run_update = native_precision
+    result = animation.pose_restore(
+        snapshot_id=snapshot["snapshot_id"], position_tolerance=0.002, rotation_tolerance=0.005
+    )
+    assert result["verification"]["matches"] is True
+    assert result["verification"]["position_tolerance"] == 0.002
+    assert result["verification"]["rotation_tolerance_radians"] == 0.005
+    assert result["observed"][0]["poses"][0]["position"] == [0.0015, 1, 2]

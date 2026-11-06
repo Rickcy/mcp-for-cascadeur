@@ -79,6 +79,23 @@ def test_invalid_arguments_do_not_reach_application(native_server):
     assert not state["calls"]
 
 
+def test_motion_plans_work_without_a_native_request(native_server):
+    client, state = native_server
+    result = client.call(
+        "motion_sample",
+        {
+            "keyframes": [
+                {"frame": 0, "poses": [{"object": "hand", "position": [0, 0, 0]}]},
+                {"frame": 2, "poses": [{"object": "hand", "position": [2, 0, 0]}]},
+            ],
+            "easing": "linear",
+        },
+    )
+    assert result["executor"] == "local"
+    assert result["result"]["keyframes"][1]["poses"][0]["position"] == [1, 0, 0]
+    assert not state["calls"]
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [

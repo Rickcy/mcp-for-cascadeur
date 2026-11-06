@@ -121,6 +121,20 @@ class RunnerClient:
             raise RunnerError("INVALID_ARGUMENTS", str(error)) from error
         if name == "python_execute" and not self.allow_python:
             raise RunnerError("PYTHON_DISABLED", "Run setup --allow-python to enable Python execution")
+        if name in {"motion_sample", "motion_mirror", "actions_list"}:
+            try:
+                result = tools[name].handler(**arguments)
+            except ValueError as error:
+                raise RunnerError("INVALID_ARGUMENTS", str(error)) from error
+            return {
+                "ok": True,
+                "result": result,
+                "execution_state": "completed",
+                "adapter_version": __version__,
+                "executor": "local",
+                "log": "",
+                "messages": [],
+            }
         expression = (
             "__import__('json').dumps(__import__('mcp_for_cascadeur.host', fromlist=['dispatch'])"
             f".dispatch({name!r}, {arguments!r}, workspace={self.workspace!r}, "

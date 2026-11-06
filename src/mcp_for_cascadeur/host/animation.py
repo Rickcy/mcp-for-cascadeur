@@ -603,9 +603,28 @@ def _prepare_sequence(scene, csc, keyframes, space, extend_timeline, create_keys
     return sequence, plan
 
 
-def pose_apply_sequence(keyframes, space="global", create_keys=True, extend_timeline=False, verify=True):
+def _verification_tolerances(position_tolerance, rotation_tolerance):
+    for name, value in (
+        ("position_tolerance", position_tolerance),
+        ("rotation_tolerance", rotation_tolerance),
+    ):
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"{name} must be finite, greater than zero and at most 1")
+    return float(position_tolerance), float(rotation_tolerance)
+
+
+def pose_apply_sequence(
+    keyframes,
+    space="global",
+    create_keys=True,
+    extend_timeline=False,
+    verify=True,
+    position_tolerance=0.001,
+    rotation_tolerance=0.001,
+):
     csc, _, _, scene = current_context()
     space = _space(space)
+    position_tolerance, rotation_tolerance = _verification_tolerances(position_tolerance, rotation_tolerance)
     sequence, plan = _prepare_sequence(scene, csc, keyframes, space, extend_timeline, create_keys)
 
     def apply(model, updater):
@@ -640,7 +659,12 @@ def pose_apply_sequence(keyframes, space="global", create_keys=True, extend_time
             layer_editor.normalize_sections(scene)
 
     modify(scene, "Apply controller pose sequence", apply)
-    verification = {"requested": bool(verify), "matches": None}
+    verification = {
+        "requested": bool(verify),
+        "matches": None,
+        "position_tolerance": position_tolerance,
+        "rotation_tolerance_radians": rotation_tolerance,
+    }
     observed = []
     if verify:
         max_position, max_rotation = 0.0, 0.0
@@ -656,7 +680,7 @@ def pose_apply_sequence(keyframes, space="global", create_keys=True, extend_time
                     max_rotation = max(max_rotation, 2 * math.acos(min(1.0, dot)))
             observed.append({"frame": frame, "poses": actual_poses})
         verification.update(
-            matches=max_position <= 0.001 and max_rotation <= 0.001,
+            matches=max_position <= position_tolerance and max_rotation <= rotation_tolerance,
             max_position_error=max_position,
             max_rotation_error_radians=max_rotation,
         )
@@ -671,10 +695,26 @@ def pose_apply_sequence(keyframes, space="global", create_keys=True, extend_time
     }
 
 
-def pose_apply(poses, frame=None, space="global", create_keys=True, verify=True):
+def pose_apply(
+    poses,
+    frame=None,
+    space="global",
+    create_keys=True,
+    verify=True,
+    position_tolerance=0.001,
+    rotation_tolerance=0.001,
+):
     _, _, _, scene = current_context()
     frame = _existing_frame(scene, frame)
-    return pose_apply_sequence([{"frame": frame, "poses": poses}], space, create_keys, False, verify)
+    return pose_apply_sequence(
+        [{"frame": frame, "poses": poses}],
+        space,
+        create_keys,
+        False,
+        verify,
+        position_tolerance=position_tolerance,
+        rotation_tolerance=rotation_tolerance,
+    )
 
 
 def pose_offset(objects, frames, delta, space="global", create_keys=False):
@@ -741,7 +781,9 @@ def _validate_snapshot(snapshot):
     return poses
 
 
-def pose_restore(snapshot_id=None, path=None, frame=None, verify=True):
+def pose_restore(
+    snapshot_id=None, path=None, frame=None, verify=True, position_tolerance=0.001, rotation_tolerance=0.001
+):
     _, _, view, scene = current_context()
     if (snapshot_id is None) == (path is None):
         raise ValueError("Provide exactly one of snapshot_id or path")
@@ -760,7 +802,15 @@ def pose_restore(snapshot_id=None, path=None, frame=None, verify=True):
     if snapshot["scene_path"] != view.get_path_name():
         raise ValueError("Snapshot belongs to a different saved scene path")
     target_frame = snapshot["frame"] if frame is None else frame
-    return pose_apply(poses, target_frame, snapshot["space"], True, verify)
+    return pose_apply(
+        poses,
+        target_frame,
+        snapshot["space"],
+        True,
+        verify,
+        position_tolerance=position_tolerance,
+        rotation_tolerance=rotation_tolerance,
+    )
 
 
 def pose_release_snapshot(snapshot_id):
@@ -810,6 +860,20 @@ KEYFRAMES = {
 }
 BOOLEAN = {"type": "boolean"}
 PATH = {"type": "string", "minLength": 1, "maxLength": 4096}
+POSITION_TOLERANCE = {
+    "type": "number",
+    "exclusiveMinimum": 0,
+    "maximum": 1,
+    "default": 0.001,
+    "description": "Accepted native position readback error in scene units; does not alter writes.",
+}
+ROTATION_TOLERANCE = {
+    "type": "number",
+    "exclusiveMinimum": 0,
+    "maximum": 1,
+    "default": 0.001,
+    "description": "Accepted native quaternion angular error in radians; does not alter writes.",
+}
 
 TOOLS = [
     Tool(
@@ -917,7 +981,15 @@ TOOLS = [
         "pose_apply",
         "Write selected animated Transform channels in one native modification, then report observed values and target errors. Solvers may move other controls.",
         pose_apply,
-        {"poses": POSES, "frame": FRAME, "space": SPACE, "create_keys": BOOLEAN, "verify": BOOLEAN},
+        {
+            "poses": POSES,
+            "frame": FRAME,
+            "space": SPACE,
+            "create_keys": BOOLEAN,
+            "verify": BOOLEAN,
+            "position_tolerance": POSITION_TOLERANCE,
+            "rotation_tolerance": ROTATION_TOLERANCE,
+        },
         ("poses",),
         False,
     ),
@@ -931,6 +1003,8 @@ TOOLS = [
             "create_keys": BOOLEAN,
             "extend_timeline": BOOLEAN,
             "verify": BOOLEAN,
+            "position_tolerance": POSITION_TOLERANCE,
+            "rotation_tolerance": ROTATION_TOLERANCE,
         },
         ("keyframes",),
         False,
@@ -961,7 +1035,14 @@ TOOLS = [
         "pose_restore",
         "Restore a pose snapshot after checking saved scene path and topology. Native interpolation and solvers can affect neighboring frames.",
         pose_restore,
-        {"snapshot_id": IDENTIFIER, "path": PATH, "frame": FRAME, "verify": BOOLEAN},
+        {
+            "snapshot_id": IDENTIFIER,
+            "path": PATH,
+            "frame": FRAME,
+            "verify": BOOLEAN,
+            "position_tolerance": POSITION_TOLERANCE,
+            "rotation_tolerance": ROTATION_TOLERANCE,
+        },
         (),
         False,
     ),
