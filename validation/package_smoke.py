@@ -25,7 +25,7 @@ import mcp_for_cascadeur
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-tools", type=int, default=96)
+    parser.add_argument("--expected-tools", type=int, default=104)
     arguments = parser.parse_args()
     imported = Path(mcp_for_cascadeur.__file__).resolve()
     if not imported.is_relative_to(Path(sys.prefix).resolve()):
@@ -79,6 +79,14 @@ def main():
                     "subtree_restore",
                     "object_data_read",
                     "object_data_set",
+                    "mocap_start",
+                    "motion_generation_start",
+                    "unbaking_start",
+                    "autophysics_start",
+                    "native_job_status",
+                    "native_jobs_list",
+                    "native_job_cancel",
+                    "native_job_recover",
                 } <= names
                 resources = await session.list_resources()
                 assert {str(item.uri) for item in resources.resources} == {
