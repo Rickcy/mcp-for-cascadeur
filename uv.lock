@@ -370,6 +370,7 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp" },
     { name = "tomlkit" },
+    { name = "uthana" },
 ]
 
 [package.optional-dependencies]
@@ -388,6 +389,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1,<2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1" },
     { name = "tomlkit", specifier = ">=0.13,<1" },
+    { name = "uthana", specifier = ">=0.8,<0.9" },
 ]
 provides-extras = ["dev"]
 
@@ -913,6 +915,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ff/50/0195198eb1d75bab716bb0a813abea4cc394bfa17a92a189f021a34859af/typing_inspection-0.4.5.tar.gz", hash = "sha256:7f16c411e7930dc79596d42ab44672a3fe5f60eb34b781a1647e7872363120c7", size = 81194, upload-time = "2026-11-04T14:13:23.774Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/0c/ea2544850a7c135e15033a5c7a8e7211136184b7ae63e2239d557c2b3019/typing_inspection-0.4.5-py3-none-any.whl", hash = "sha256:bc210535442b39e1bf2805e0c7a17dfd6a4ace760c84c7f7d16245d23a6b1c39", size = 14874, upload-time = "2026-11-04T14:13:22.616Z" },
+]
+
+[[package]]
+name = "uthana"
+version = "0.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/64/5244204aff2a1a9950bc35e5f899aab95f1a02abcdb7921d0c1b63385b7b/uthana-0.8.0.tar.gz", hash = "sha256:a0ced121281f2f24824c6e1c61652cb29bc20eb76074d7edebe06a70943ed766", size = 66892, upload-time = "2026-11-05T17:46:37.886Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/39/ee655951a29e3c816ad5b97366f14af42b25b898ada6b86d2bbff848871d/uthana-0.8.0-py3-none-any.whl", hash = "sha256:ca92a3b0eed84f8f6c7587241879cfecc54444f4b2a68bb4bf44d5c992f46d6c", size = 40001, upload-time = "2026-11-05T17:46:36.745Z" },
 ]
 
 [[package]]

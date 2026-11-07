@@ -3,7 +3,9 @@
 The agreed architecture uses Uthana for motion generation and video capture,
 Gemini Flash or Qwen-VL for visual review, and this MCP bridge for applying,
 editing and measuring animation in Cascadeur. Each review job selects one vision
-provider. Provider integrations and the workflow below are planned work.
+provider. Uthana text/video generation, existing-rig upload and checked downloads
+are implemented. Native Cascy transfer and persistence have live acceptance;
+visual review and the remaining high-level workflow are planned work.
 Released behavior and native evidence are recorded in
 [capabilities.md](capabilities.md) and [validation.md](validation.md).
 

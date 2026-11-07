@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -98,6 +99,11 @@ def test_tools_json_serializes_real_contracts_without_a_running_application(tmp_
     status = next(tool for tool in tools if tool["name"] == "app_status")
     assert status["read_only"]
     assert status["input_schema"]["additionalProperties"] is False
+    cloud = next(tool for tool in tools if tool["name"] == "uthana_text_start")
+    assert cloud["open_world"] is True
+    assert cloud["read_only"] is False
+    assert {"max_cost_usd", "request_id"} <= set(cloud["input_schema"]["required"])
+    assert status["open_world"] is False
 
 
 def test_module_entrypoint_preserves_failed_command_exit_status(tmp_path):
@@ -138,3 +144,77 @@ def test_setup_source_precedence_uses_current_remote_install_by_default(
     assert cli.main(["setup", "--workspace", str(tmp_path / "workspace"), "--json", *flags]) == 0
     assert json.loads(capsys.readouterr().out)["ok"]
     assert captured == [{"source": expected_source}]
+
+
+def test_credential_prompt_hides_value_and_does_not_change_config(tmp_path, monkeypatch, capsys):
+    from mcp_for_cascadeur import credentials
+
+    monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _: "test-fixture-hidden")
+    monkeypatch.setattr(
+        credentials,
+        "store_secret",
+        lambda provider, value: calls.append((provider, value)) or {"provider": provider, "stored": True},
+    )
+    assert cli.main(["credentials", "set", "uthana", "--json"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["stored"] is True
+    assert "test-fixture-hidden" not in output.out + output.err
+    assert calls == [("uthana", "test-fixture-hidden")]
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_credentials_from_env_does_not_prompt_or_echo(tmp_path, monkeypatch, capsys):
+    from mcp_for_cascadeur import credentials
+
+    monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-fixture-inherited")
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _: pytest.fail("must not prompt"))
+    values = []
+    monkeypatch.setattr(
+        credentials,
+        "store_secret",
+        lambda provider, value: values.append((provider, value)) or {"provider": provider, "stored": True},
+    )
+    assert cli.main(["credentials", "set", "gemini", "--from-env", "--json"]) == 0
+    output = capsys.readouterr()
+    assert values == [("gemini", "test-fixture-inherited")]
+    assert "test-fixture-inherited" not in output.out + output.err
+
+
+def test_credentials_refuse_echoing_getpass_fallback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path))
+
+    def insecure_prompt(_):
+        warnings.warn("Cannot control echo on the terminal.", cli.getpass.GetPassWarning)
+        pytest.fail("must not reach fallback input")
+
+    monkeypatch.setattr(cli.getpass, "getpass", insecure_prompt)
+    assert cli.main(["credentials", "set", "uthana", "--json"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["code"] == "SECURE_PROMPT_UNAVAILABLE"
+
+
+def test_credentials_unexpected_failure_redacts_exception(tmp_path, monkeypatch, capsys):
+    from mcp_for_cascadeur import credentials
+
+    monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        credentials,
+        "credential_status",
+        lambda _: (_ for _ in ()).throw(RuntimeError("test-fixture-sensitive-error")),
+    )
+    assert cli.main(["credentials", "status", "uthana", "--json"]) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out)["code"] == "CREDENTIAL_OPERATION_FAILED"
+    assert "test-fixture-sensitive-error" not in output.out + output.err
+
+
+def test_credentials_status_and_delete_do_not_connect_to_native(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path))
+    monkeypatch.delenv("UTHANA_API_KEY", raising=False)
+    assert cli.main(["credentials", "status", "uthana", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["configured"] is False
+    assert cli.main(["credentials", "delete", "uthana", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["deleted"] is False

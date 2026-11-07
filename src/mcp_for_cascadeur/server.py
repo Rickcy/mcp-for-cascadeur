@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import mcp.types as types
@@ -14,6 +16,7 @@ from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
 
 from . import __version__
+from .credentials import CredentialError, load_secret
 from .host import registry
 from .runner import RunnerClient, RunnerError
 from .settings import Config, load_config
@@ -73,6 +76,15 @@ it never animates by repeated frame-setting. Stop only owned playback and verify
 stop before editing. All file paths must be absolute and inside the configured workspace.
 Python is opt-in and has Cascadeur's full application privileges. Successful tool execution
 does not establish physical plausibility, contact quality or professional animation quality.
+
+Uthana tools call an external cloud service from the MCP process; they do not edit Cascadeur.
+Read uthana_account for current account/rate information before paid requests. Submit text
+or local video with an explicit cost cap and unique request_id; retain the durable job_id.
+Poll uthana_job_status and inspect uncertain submissions before any retry. uthana_download
+saves verified provider output inside the configured workspace; importing or retargeting that
+motion is a separate native step. An accepted cloud request is not a completed animation.
+Configure API keys through the hidden credentials CLI or provider environment variables,
+never in tool arguments, scene scripts, prompts, or settings files.
 """
 
 
@@ -157,16 +169,37 @@ def _call_with_job_fallback(connection, definition, arguments, config):
         }
 
 
-def create_server(config: Config, client: RunnerClient | None = None) -> Server:
+def create_server(config: Config, client: RunnerClient | None = None, cloud=None) -> Server:
+    from .cloud import CloudError, CloudJobs
+
     connection = client or RunnerClient(config.endpoint, config.workspace, allow_python=config.allow_python)
     tools = registry()
     if not config.allow_python:
         tools.pop("python_execute", None)
+    cloud_jobs = cloud if cloud is not None else CloudJobs(config.workspace, credential=load_secret)
+    cloud_tools = cloud_jobs.tools()
+    if set(tools) & set(cloud_tools):
+        raise ValueError("Cloud and native tool names must be distinct")
+    available = {**tools, **cloud_tools}
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:
+            try:
+                await cloud_jobs.aclose()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Cloud client cleanup failed; provider details were withheld."
+                )
+
     server = Server(
         "mcp-for-cascadeur",
         version=__version__,
         instructions=GUIDE,
         website_url="https://github.com/Rickcy/mcp-for-cascadeur",
+        lifespan=lifespan,
     )
 
     @server.list_tools()
@@ -179,25 +212,40 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
                 annotations=types.ToolAnnotations(
                     readOnlyHint=definition.read_only,
                     destructiveHint=not definition.read_only,
-                    openWorldHint=False,
+                    openWorldHint=definition.name in cloud_tools,
                 ),
             )
-            for definition in tools.values()
+            for definition in available.values()
         ]
 
     @server.call_tool(validate_input=False)
     async def call_tool(name, arguments):
         try:
-            if name not in tools:
+            if name not in available:
                 raise RunnerError("UNKNOWN_TOOL", f"Tool is unavailable: {name}")
-            payload = await asyncio.to_thread(
-                _call_with_job_fallback,
-                connection,
-                tools[name],
-                {} if arguments is None else arguments,
-                config,
-            )
-            png = await asyncio.to_thread(_verify_file, payload, config)
+            if name in cloud_tools:
+                try:
+                    cloud_tools[name].validate({} if arguments is None else arguments)
+                except ValueError as invalid:
+                    raise RunnerError("INVALID_ARGUMENTS", str(invalid)) from invalid
+                result = await cloud_jobs.call(name, {} if arguments is None else arguments)
+                payload = {
+                    "ok": True,
+                    "result": result,
+                    "execution_state": result.get("execution_state", "completed"),
+                    "adapter_version": __version__,
+                    "executor": "uthana",
+                }
+                png = None
+            else:
+                payload = await asyncio.to_thread(
+                    _call_with_job_fallback,
+                    connection,
+                    tools[name],
+                    {} if arguments is None else arguments,
+                    config,
+                )
+                png = await asyncio.to_thread(_verify_file, payload, config)
             content = [
                 types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, allow_nan=False))
             ]
@@ -210,9 +258,21 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
             return types.CallToolResult(content=content, structuredContent=payload, isError=False)
         except RunnerError as error:
             payload = {"error": error.as_dict()}
+        except CloudError as error:
+            payload = {"error": error.as_dict()}
+        except CredentialError as error:
+            payload = {
+                "error": {"code": error.code, "message": str(error), "execution_state": error.execution_state}
+            }
         except Exception as error:
             payload = {
-                "error": {"code": type(error).__name__, "message": str(error), "execution_state": "unknown"}
+                "error": {
+                    "code": "CLOUD_OPERATION_FAILED" if name in cloud_tools else type(error).__name__,
+                    "message": "The cloud operation failed; inspect its durable job before retrying."
+                    if name in cloud_tools
+                    else str(error),
+                    "execution_state": "unknown",
+                }
             }
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(payload))],
@@ -244,8 +304,13 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
             return [ReadResourceContents(content=GUIDE, mime_type="text/plain")]
         if str(uri) == "cascadeur://tools":
             manifest = [
-                {"name": item.name, "read_only": item.read_only, "input_schema": item.input_schema}
-                for item in tools.values()
+                {
+                    "name": item.name,
+                    "read_only": item.read_only,
+                    "input_schema": item.input_schema,
+                    "open_world": item.name in cloud_tools,
+                }
+                for item in available.values()
             ]
             return [ReadResourceContents(content=json.dumps(manifest), mime_type="application/json")]
         if str(uri) == "cascadeur://scene":

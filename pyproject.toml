@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Eugene Kudenko" }]
-dependencies = ["mcp>=1.28,<2", "tomlkit>=0.13,<1"]
+dependencies = [
+    "mcp>=1.28,<2",
+    "tomlkit>=0.13,<1",
+    "uthana>=0.8,<0.9",
+]
 
 [project.urls]
 Repository = "https://github.com/Rickcy/mcp-for-cascadeur"

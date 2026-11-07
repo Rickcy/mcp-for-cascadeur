@@ -40,3 +40,12 @@ def test_absent_settings_do_not_write_any_files(tmp_path):
 def test_non_boolean_python_permission_is_rejected():
     with pytest.raises(ValueError):
         Config(allow_python="false")
+
+
+def test_persisted_settings_never_include_inherited_cloud_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("UTHANA_API_KEY", "test-fixture-uthana")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-fixture-gemini")
+    target = save_config(Config(workspace=tmp_path), tmp_path / "settings.json")
+    document = target.read_text(encoding="utf-8")
+    assert "test-fixture" not in document
+    assert not {"api_key", "uthana_api_key", "gemini_api_key"} & json.loads(document).keys()

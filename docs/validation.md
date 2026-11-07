@@ -4,6 +4,47 @@ Local environment: Windows, Cascadeur 2026.2.3 (build 44356), embedded Python
 3.11.0, external Python 3.12.14. Native checks use disposable copies of the
 application's installed samples. No sample assets are distributed here.
 
+## Uthana text and video transfer
+
+Live acceptance on 2026-11-07 used Uthana SDK 0.8.0 and installed Windows
+Cascadeur 2026.2.3 build 44356. Cascy's original neutral model was exported and
+uploaded as an existing rig with auto-rigging disabled. Both downloads requested
+that target character and 30 FPS. Source FBX files and native scene copies were
+kept outside the repository in the validation workspace.
+
+| Check | Observed result |
+| --- | --- |
+| Text-to-motion 3.0 | A four-second walking request completed; native source metadata contained 97 samples at 24 FPS. Retargeted FBX imported as 120 stored frames at 30 FPS. |
+| Video-to-motion 2.1 | A rendered walking reference, 61 frames at 30 FPS with 2.034-second container duration, completed and imported as 61 stored frames. This test does not establish camera-captured human-video accuracy. |
+| Target rig | Both imported clips retained 289 objects, 66 Joint objects, all 43 Point controls, original native IDs and owned rig topology. Raw source and target skeleton preflight passed. |
+| Native persistence | Both `.casc` files were saved, reopened and compared against complete bounded model checkpoints: zero differences. A reopened application view has a different view identity; model equivalence was checked separately. |
+| Editable controls | Both clips passed character edit readiness. A 0.1-unit left-hand correction at video frame 30 passed the checked semantic editor on a separate copy, including protected animation and full-clip connection checks. |
+| Rig geometry | Text motion inspection covered all 120 stored frames and 26 body connections; maximum native connection-anchor error was 0.005429 scene units. |
+| Playback | Text playback advanced through the full requested range, using one native play command and one stop command. Stop was observed and verified. The single scripted frame set positioned the playhead before playback. |
+| Cloud restart/replay | Submission and polling used separate Python processes. Replaying the completed text request through a provider object that rejects every network call returned its original job and result; no generation was repeated. |
+| Installed MCP | The final wheel was exercised through the official MCP client: live account read, durable status, completed text-request replay and native scene information all succeeded. Its user-configured server exposed 111 tools including optional Python. |
+
+Import fidelity is an approximation. Across five sampled frames in each clip,
+raw FBX versus native Cascy showed maximum Joint position differences of
+0.540495 scene units for text and 0.730800 for video. The corresponding maximum
+local/global orientation differences were 0.197311 and 0.357904 radians,
+including twist joints. Video foot-position differences stayed below 0.026
+scene units at these samples; fingertip world-space displacement inherited
+wrist changes while finger-local rotations were retained. These measurements
+did not pass an exact-pose comparison; no tolerance was relaxed to label them
+lossless. The native save/reopen comparisons above concern the imported result.
+
+The account balance changed by $0.5059 during the two generation tests. Native
+TTM metadata reported 4.041667 seconds for the four-second request, which
+motivated reserving an additional output second in new pre-submit cost
+estimates. Balance change is recorded separately from a per-job billing ledger;
+the integration does not claim an upstream hard spending cap.
+
+Windows DPAPI stored credentials outside the repository. Neither native
+acceptance files nor credential records are distribution contents. Visual
+quality scoring, contact repair, arbitrary-rig mapping and checked editing of
+longer clips remain separate milestones. See [Uthana setup](uthana.md).
+
 ## Native workflow probes on 2026-11-07
 
 Additional installed-build checks exercised Motion Generation, reference-video

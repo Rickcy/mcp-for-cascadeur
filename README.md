@@ -3,8 +3,8 @@
 Inspect native rigs, author body and finger animation, preserve curve metadata,
 retime character keys and recover interrupted edits through MCP. Structured tools
 cover generic controllers and validated native character semantics. Optional
-Python execution exposes the rest of Cascadeur's API. The registry contains 103
-structured tools and the optional Python tool.
+Python execution exposes the rest of Cascadeur's API. The server contains 103
+native structured tools, seven Uthana tools and the optional Python tool.
 
 The stdio process uses the official MCP Python SDK. Native operations run through
 the script runner shipped with Cascadeur, on its main thread. Setup copies this
@@ -78,8 +78,11 @@ uvx mcp-for-cascadeur setup --install-startup --local-tool
 
 ## Animation workflow
 
-The [animation workflow roadmap](docs/roadmap.md) describes the planned Uthana
-integration, Gemini Flash / Qwen-VL review, and native editing and validation.
+Uthana text-to-motion and video-to-motion run in the external MCP process. See
+[cloud setup and Cascy transfer](docs/uthana.md) for credentials, cost estimates,
+durable jobs and importing a retargeted result. The
+[animation workflow roadmap](docs/roadmap.md) describes the remaining visual
+review and measured revision work.
 
 1. Read `app_status`, `app_capabilities`, `objects_list` and `tracks_list`.
 2. Use `object_inspect` to find actual body, hand and finger channels. IDs avoid
@@ -108,6 +111,7 @@ Tool groups:
 | Rig profiles | Named groups for body controls, hands, fingers or props; scene/topology validation |
 | Characters | RigInfo ownership, semantic body groups, authored finger rotations, curve-preserving edits and synchronized retiming |
 | Native jobs | Video Mocap, pose-based Motion Generation, Animation Unbaking and AutoPhysics, with durable progress and recovery |
+| Uthana | Account/rates, existing-rig upload, text/video generation, durable job status and hash-checked FBX/GLB download |
 | Recovery | Persistent pre-write journal, verified rollback, whole-model checkpoints, durable character poses and recovery fences |
 | Review and exchange | Native playback observation, camera framing, fresh PNG images, FBX import/export and staged hash-checked publication |
 | Advanced | Documented native actions and optional Python with `csc`, `app`, `view`, `scene`, `workspace` |

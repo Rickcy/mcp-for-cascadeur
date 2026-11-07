@@ -6,6 +6,25 @@ a compatible open scene. A tool's presence is not a claim of native acceptance,
 physical plausibility or artistic quality. Measured acceptance is recorded in
 [validation.md](validation.md).
 
+## Uthana cloud operations
+
+Seven external tools provide account/rates, existing-rig upload, text-to-motion
+3.0, video-to-motion 2.1, durable job status/listing and FBX/GLB downloads. They do
+not require a live Cascadeur connection. The SDK and cloud credentials are never
+loaded by the embedded native host. See [Uthana setup and transfer](uthana.md).
+
+Submissions require a unique request ID and a pre-submit estimate ceiling. The
+ceiling is a local estimate check; the provider offers no hard billing-cap
+parameter. Text estimates reserve an additional output second. Inputs, receipts
+and downloads are workspace-scoped and hash-checked. Unknown submissions are
+never automatically repeated; known upstream jobs can be polled after restart.
+Downloads use verified staging and exclusive publication without overwrites.
+
+The live route uploads Cascy's original rig, downloads motion retargeted to it,
+and imports animation into a fresh copy. Native import is an approximation;
+save/reopen fidelity is verified separately. Generic skeleton retargeting and
+automatic artistic/physical quality assessment are not provided by these tools.
+
 ## Application and animation operations
 
 | Capability | Structured tools | Contract |

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -21,12 +22,16 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 import mcp_for_cascadeur
+from mcp_for_cascadeur.cloud import CLOUD_TOOLS
+from mcp_for_cascadeur.host import registry
+from mcp_for_cascadeur.host.state import canonical_bytes
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-tools", type=int, default=104)
+    parser.add_argument("--expected-tools", type=int)
     arguments = parser.parse_args()
+    expected_tools = arguments.expected_tools or len(registry()) + len(CLOUD_TOOLS)
     imported = Path(mcp_for_cascadeur.__file__).resolve()
     if not imported.is_relative_to(Path(sys.prefix).resolve()):
         raise RuntimeError(
@@ -40,6 +45,11 @@ def main():
             assert self.path == "/run"
             identifier = re.search(r"request_id='([0-9a-f]{32})'", body["code"]).group(1)
             requests.append(identifier)
+            if ".dispatch('native_job_status', " in body["code"]:
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if ".dispatch('scene_info', {}" in body["code"]:
                 result = {
                     "ok": True,
@@ -69,7 +79,7 @@ def main():
                 initialized = await session.initialize()
                 assert initialized.serverInfo.name == "mcp-for-cascadeur"
                 tools = await session.list_tools()
-                assert len(tools.tools) == arguments.expected_tools - 1
+                assert len(tools.tools) == expected_tools - 1
                 names = {tool.name for tool in tools.tools}
                 assert "python_execute" not in names
                 assert {
@@ -87,7 +97,16 @@ def main():
                     "native_jobs_list",
                     "native_job_cancel",
                     "native_job_recover",
+                    "uthana_account",
+                    "uthana_text_start",
+                    "uthana_video_start",
+                    "uthana_character_upload",
+                    "uthana_job_status",
+                    "uthana_jobs_list",
+                    "uthana_download",
                 } <= names
+                for tool in tools.tools:
+                    assert tool.annotations.openWorldHint is (tool.name in CLOUD_TOOLS)
                 resources = await session.list_resources()
                 assert {str(item.uri) for item in resources.resources} == {
                     "cascadeur://guide",
@@ -97,11 +116,14 @@ def main():
                 guide = await session.read_resource("cascadeur://guide")
                 assert "pose_apply_sequence" in guide.contents[0].text
                 contracts = await session.read_resource("cascadeur://tools")
-                assert len(json.loads(contracts.contents[0].text)) == arguments.expected_tools - 1
+                assert len(json.loads(contracts.contents[0].text)) == expected_tools - 1
                 scene = await session.read_resource("cascadeur://scene")
                 assert json.loads(scene.contents[0].text)["name"] == "Isolated package fixture"
                 invalid = await session.call_tool("timeline_set_frame", {"frame": True})
                 assert invalid.isError and invalid.structuredContent["error"]["code"] == "INVALID_ARGUMENTS"
+                invalid_cloud = await session.call_tool("uthana_text_start", {"length": True})
+                assert invalid_cloud.isError
+                assert invalid_cloud.structuredContent["error"]["code"] == "INVALID_ARGUMENTS"
                 prompts = await session.list_prompts()
                 prompt = await session.get_prompt(
                     "animate_character", {"brief": "Isolated package acceptance."}
@@ -120,7 +142,13 @@ def main():
                     and error["execution_state"] == "unknown"
                 )
                 assert error["request_id"] == requests[-1] and "transaction_status" in error["message"]
-                assert len(requests) == 2
+                offline = await session.call_tool("native_job_status", {"job_id": "a" * 32})
+                assert not offline.isError
+                assert offline.structuredContent["executor"] == "durable_journal"
+                assert offline.structuredContent["result"]["connected"] is False
+                assert offline.structuredContent["result"]["status"] == "running"
+                assert offline.structuredContent["result"]["execution_state"] == "unknown"
+                assert len(requests) == 3
                 return {
                     "version": initialized.serverInfo.version,
                     "enabled_tools": len(tools.tools),
@@ -130,6 +158,8 @@ def main():
                     "native_calls": 0,
                     "timeout_request_id_preserved": True,
                     "automatic_retries": 0,
+                    "cloud_schema_and_annotations": True,
+                    "offline_native_job_status": True,
                     "package_import": str(imported),
                 }
 
@@ -150,8 +180,34 @@ def main():
                 ),
                 encoding="utf-8",
             )
+            recovery = home / "workspace" / ".cascadeur-mcp" / "recovery"
+            for folder, identifier, record in (
+                (
+                    "jobs",
+                    "a" * 32,
+                    {
+                        "schema_version": 1,
+                        "job_id": "a" * 32,
+                        "request_id": "b" * 32,
+                        "operation": "motion_generation",
+                        "status": "running",
+                        "phase": "wait",
+                    },
+                ),
+                (
+                    "transactions",
+                    "b" * 32,
+                    {"schema_version": 1, "request_id": "b" * 32, "status": "pending"},
+                ),
+            ):
+                target = recovery / folder / f"{identifier}.json"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                record["record_sha256"] = hashlib.sha256(canonical_bytes(record)).hexdigest()
+                target.write_bytes(canonical_bytes(record))
             environment = dict(os.environ, MCP_FOR_CASCADEUR_HOME=str(home))
             environment.pop("PYTHONPATH", None)
+            environment.pop("UTHANA_API_KEY", None)
+            environment.pop("GEMINI_API_KEY", None)
             result = asyncio.run(check(environment))
         print(json.dumps(result, indent=2))
     finally:

@@ -8,3 +8,7 @@ dist/
 .coverage
 htmlcov/
 .local/
+.env
+.env.*
+!.env.example
+*.dpapi.json

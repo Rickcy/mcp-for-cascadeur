@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import sys
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -58,6 +61,18 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall.add_argument("--json", action="store_true")
     tools = commands.add_parser("tools", help="List tools without connecting to Cascadeur.")
     tools.add_argument("--json", action="store_true")
+    credentials = commands.add_parser(
+        "credentials", help="Manage cloud API keys without command-line secrets."
+    )
+    credential_commands = credentials.add_subparsers(dest="credential_command", required=True)
+    for action in ("set", "status", "delete"):
+        credential = credential_commands.add_parser(action)
+        credential.add_argument("provider", choices=("uthana", "gemini"))
+        credential.add_argument("--json", action="store_true")
+        if action == "set":
+            credential.add_argument(
+                "--from-env", action="store_true", help="Encrypt the existing provider environment variable."
+            )
     return parser
 
 
@@ -65,6 +80,36 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     command = args.command or "serve"
     try:
+        if command == "credentials":
+            from .credentials import (
+                ENVIRONMENT,
+                CredentialError,
+                credential_status,
+                delete_secret,
+                store_secret,
+            )
+
+            if args.credential_command == "set":
+                if args.from_env:
+                    value = os.environ.get(ENVIRONMENT[args.provider], "")
+                else:
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("error", getpass.GetPassWarning)
+                            value = getpass.getpass(f"{args.provider} API key (hidden): ")
+                    except getpass.GetPassWarning:
+                        raise CredentialError(
+                            "SECURE_PROMPT_UNAVAILABLE",
+                            "A hidden prompt is unavailable; use --from-env with the provider environment variable.",
+                        ) from None
+                result = store_secret(args.provider, value)
+                del value
+            elif args.credential_command == "delete":
+                result = delete_secret(args.provider)
+            else:
+                result = credential_status(args.provider)
+            _output({"ok": True, **result}, args.json)
+            return 0
         config = load_config()
         if command == "serve":
             from .server import main as serve
@@ -72,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             serve(config)
             return 0
         if command == "tools":
+            from .cloud import CLOUD_TOOLS
             from .host import registry
 
             _output(
@@ -81,8 +127,9 @@ def main(argv: list[str] | None = None) -> int:
                         "description": tool.description,
                         "input_schema": tool.input_schema,
                         "read_only": tool.read_only,
+                        "open_world": tool.name in CLOUD_TOOLS,
                     }
-                    for tool in registry().values()
+                    for tool in [*registry().values(), *CLOUD_TOOLS.values()]
                 ],
                 args.json,
             )
@@ -136,6 +183,21 @@ def main(argv: list[str] | None = None) -> int:
             _output(result, args.json)
             return 0
     except Exception as exc:
+        # Credential prompts/storage must never echo an unexpected exception
+        # that could include the entered value.
+        if command == "credentials":
+            from .credentials import CredentialError
+
+            if not isinstance(exc, CredentialError):
+                _output(
+                    {
+                        "ok": False,
+                        "code": "CREDENTIAL_OPERATION_FAILED",
+                        "error": "The credential operation failed; no API request was sent.",
+                    },
+                    args.json,
+                )
+                return 1
         result = {"ok": False, "code": getattr(exc, "code", type(exc).__name__), "error": str(exc)}
         if hasattr(exc, "execution_state"):
             result["execution_state"] = exc.execution_state

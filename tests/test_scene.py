@@ -279,3 +279,30 @@ def test_property_inspection_uses_strict_native_mode_overloads(kind, mode):
     result = inspection._property_record(behaviors, data, "behavior", "property", 5)
     assert "unavailable" not in result
     assert len(calls) == 1
+
+
+def test_fbx_scene_import_can_preserve_source_coordinates(monkeypatch, tmp_path):
+    from mcp_for_cascadeur.host import recovery
+
+    path = tmp_path / "source.fbx"
+    path.write_bytes(b"fixture")
+    common.configure(tmp_path)
+    loader = SimpleNamespace(import_scene=Mock())
+    _, view, native_scene = context(monkeypatch)
+    monkeypatch.setattr(scene, "_native_tool", lambda *_: SimpleNamespace(get_fbx_loader=lambda _: loader))
+    monkeypatch.setattr(scene, "scene_info", lambda: {})
+    monkeypatch.setattr(recovery, "note_native_attempt", Mock())
+    committed = Mock()
+    monkeypatch.setattr(recovery, "note_native_commit", committed)
+    scene.fbx_import(str(path), mode="scene", set_offset=False)
+    loader.import_scene.assert_called_once_with(str(path), -1, False)
+    committed.assert_called_once_with(native_scene)
+
+
+@pytest.mark.parametrize("mode,offset", [("animation", False), ("model", False), ("scene", 0)])
+def test_fbx_import_rejects_unsupported_offset_before_native_access(monkeypatch, mode, offset):
+    native = Mock(side_effect=AssertionError("Native context must not be accessed"))
+    monkeypatch.setattr(common, "current_context", native)
+    with pytest.raises(ValueError, match="set_offset"):
+        scene.fbx_import("unused.fbx", mode=mode, set_offset=offset)
+    native.assert_not_called()

@@ -254,7 +254,7 @@ def viewport_capture(path, width=1280, height=720, samples=1, overwrite=False):
     return _file_result(destination, before, "image/png")
 
 
-def fbx_import(path, mode="scene", take=-1):
+def fbx_import(path, mode="scene", take=-1, set_offset=True):
     from . import recovery
 
     methods = {
@@ -267,12 +267,16 @@ def fbx_import(path, mode="scene", take=-1):
         raise ValueError("Unsupported FBX import mode.")
     if isinstance(take, bool) or not isinstance(take, int) or take < -1:
         raise ValueError("take must be -1 or a nonnegative take index.")
+    if type(set_offset) is not bool or (mode != "scene" and not set_offset):
+        raise ValueError("set_offset must be a boolean; disabling it applies only to scene import.")
     destination = common.workspace_path(path, must_exist=True, suffixes=(".fbx",))
     _, app, view, native_scene = common.current_context()
     loader = _native_tool(app, "FbxSceneLoader").get_fbx_loader(view)
     method = getattr(loader, methods[mode])
     recovery.note_native_attempt(native_scene)
-    if mode in ("scene", "animation"):
+    if mode == "scene" and not set_offset:
+        method(str(destination), take, False)
+    elif mode in ("scene", "animation"):
         method(str(destination), take)
     else:
         method(str(destination))
@@ -468,6 +472,11 @@ TOOLS = [
             "path": _TEXT,
             "mode": {"enum": ["scene", "animation", "model", "add_model"]},
             "take": {"type": "integer", "minimum": -1},
+            "set_offset": {
+                "type": "boolean",
+                "default": True,
+                "description": "For scene imports, disable native placement offset when comparing original coordinates.",
+            },
         },
         ("path",),
         False,
