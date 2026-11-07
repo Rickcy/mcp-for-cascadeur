@@ -3,7 +3,7 @@
 Inspect native rigs, author body and finger animation, preserve curve metadata,
 retime character keys and recover interrupted edits through MCP. Structured tools
 cover generic controllers and validated native character semantics. Optional
-Python execution exposes the rest of Cascadeur's API. The registry contains 95
+Python execution exposes the rest of Cascadeur's API. The registry contains 103
 structured tools and the optional Python tool.
 
 The stdio process uses the official MCP Python SDK. Native operations run through
@@ -78,6 +78,9 @@ uvx mcp-for-cascadeur setup --install-startup --local-tool
 
 ## Animation workflow
 
+The [animation workflow roadmap](docs/roadmap.md) describes the planned Uthana
+integration, Gemini Flash / Qwen-VL review, and native editing and validation.
+
 1. Read `app_status`, `app_capabilities`, `objects_list` and `tracks_list`.
 2. Use `object_inspect` to find actual body, hand and finger channels. IDs avoid
    ambiguous names. Bind convenient names using `rig_profile_create`.
@@ -104,6 +107,7 @@ Tool groups:
 | Motion plans | Easing, shortest-arc quaternion SLERP, reflection and object mapping |
 | Rig profiles | Named groups for body controls, hands, fingers or props; scene/topology validation |
 | Characters | RigInfo ownership, semantic body groups, authored finger rotations, curve-preserving edits and synchronized retiming |
+| Native jobs | Video Mocap, pose-based Motion Generation, Animation Unbaking and AutoPhysics, with durable progress and recovery |
 | Recovery | Persistent pre-write journal, verified rollback, whole-model checkpoints, durable character poses and recovery fences |
 | Review and exchange | Native playback observation, camera framing, fresh PNG images, FBX import/export and staged hash-checked publication |
 | Advanced | Documented native actions and optional Python with `csc`, `app`, `view`, `scene`, `workspace` |
@@ -113,11 +117,55 @@ and an `animate_character` prompt.
 Run `mcp-for-cascadeur tools --json` from an installed tool environment to inspect
 all parameter contracts.
 
+## Native animation jobs
+
+The following structured tools run on Windows Cascadeur **2026.2.3, build 44356**
+with a validated Cascy rig. They check the installed build and native scene
+before dispatch. Other builds and arbitrary humanoid rigs need separate
+acceptance; similar controller names do not establish compatibility.
+
+| Start tool | Operation |
+| --- | --- |
+| `motion_generation_start` | Generate native motion from existing keyed endpoint poses and a trajectory. This is pose-based generation, not a text-prompt endpoint. |
+| `mocap_start` | Process a workspace MP4 or an existing native reference plane. The official Mocap model must be installed; downloading it requires `allow_model_download=true`. |
+| `unbaking_start` | Convert baked/FIXED character motion to classic editable intervals, including CLAMPED_BEZIER, and report observed changes. |
+| `autophysics_start` | Calculate and apply native AutoPhysics with the explicit `all_frames` or `only_keys` choice, then measure the result. |
+
+Each start returns a `job_id`. Poll `native_job_status`, or use
+`native_jobs_list`, until a terminal outcome is observed. Progress reports native
+stages and available observations; it remains indeterminate when the application
+provides no reliable fraction. A queued action or closed dialog is not completion.
+
+Jobs preserve a hashed source `.casc` and use a separate working scene before
+editing. The durable receipt owns the scene and blocks competing writes until
+completion or verified recovery. Final checks protect static data, unrelated
+objects and animation outside the declared interval before publishing a fresh
+output file. They do not certify artistic quality or physical plausibility.
+
+`native_job_cancel` requests cancellation. The write fence remains until native
+work has stopped and restoration is verified. An uncertain stop can require an
+application restart followed by `native_job_recover`. Status and list tools can
+read checksummed local journal records when Cascadeur or its transport is
+unavailable; this offline observation does not restart or replay native work.
+
+Native jobs accept at most **512 stored frames**, including the following
+terminal guard frame. Existing character pose/curve edits retain their
+121-frame contract, and `character_retime` accepts 2–8 synchronized keys.
+Unbaking can produce more keys than this retimer accepts.
+
+For a prepared scene with endpoint keys at frames 0 and 30 and a stored successor,
+the development smoke example creates a fresh scene copy and records job evidence:
+
+```powershell
+uv run python examples/native_job_smoke.py motion_generation --scene "C:\Animation\posed-walk.casc" --first 0 --last 30
+```
+
 ## Scope
 
 This is an initial development release. It does not guarantee finished animation
-from a prompt. Physics, AutoPosing and retargeting menu actions report dispatch;
-the affected native tool, selection and license still determine the result.
+from a prompt. Generic menu actions report dispatch; the affected native tool,
+selection and license still determine the result. Native jobs add their own
+operation-specific completion and protected-state checks.
 General Python execution has the same privileges as Cascadeur and is optional.
 
 `tracks_retime` handles standalone transforms. `character_retime` uses authored
@@ -125,6 +173,9 @@ Point positions, validated finger-local rotations and native settings; driven
 Joint outputs are solved and checked. Its bounded contract requires synchronized
 keys and supported interpolation. Curve-preserving tools retain section metadata
 and protect unrelated channels; solver-coupled movement is reported separately.
+CLAMPED_BEZIER remains its native interval type through these edits, classic
+retiming and checkpoint restoration. Exact metadata preservation does not promise
+the edited trajectory's original shape; custom spatial tangents remain excluded.
 
 Checked model edits persist a full bounded checkpoint before mutation. Failure
 triggers checked Undo and a guarded manual restoration fallback. A failed or

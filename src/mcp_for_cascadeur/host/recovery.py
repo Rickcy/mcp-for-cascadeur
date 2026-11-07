@@ -526,7 +526,12 @@ def status_by_id(request_id):
 
 def guard(operation, view=None, scene=None):
     # The caller must additionally enforce quarantine save-as (overwrite=False).
-    if operation.startswith("recovery_") or operation in {"scene_save", "playback_stop"}:
+    if operation.startswith("recovery_") or operation in {
+        "scene_save",
+        "playback_stop",
+        "native_job_cancel",
+        "native_job_recover",
+    }:
         return
     if active_transaction() is not None:
         return
@@ -711,6 +716,18 @@ class Receipt:
                 "cause": self.record["failure"],
             },
         ) from cause
+
+
+@contextmanager
+def receipt_context(receipt):
+    """Attach an existing durable receipt while its owned async stage runs."""
+    if active_transaction() is not None:
+        raise RecoveryError("NESTED_TRANSACTION", "A native receipt is already active")
+    token = _active.set(receipt)
+    try:
+        yield receipt
+    finally:
+        _active.reset(token)
 
 
 @contextmanager

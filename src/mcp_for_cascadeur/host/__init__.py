@@ -64,6 +64,7 @@ def registry() -> dict[str, Tool]:
         data_channels,
         exchange,
         inspection,
+        jobs,
         playback,
         profiles,
         recovery,
@@ -100,6 +101,7 @@ def registry() -> dict[str, Tool]:
         *exchange.TOOLS,
         *subtrees.TOOLS,
         *data_channels.TOOLS,
+        *jobs.TOOLS,
     ]
     result = {tool.name: tool for tool in definitions}
     if len(result) != len(definitions):
@@ -193,10 +195,22 @@ def _verify_result(value):
 
 
 def _execute_write(tool, arguments, request_id):
-    from . import playback, recovery
+    from . import jobs, playback, recovery
+
+    if tool.name in jobs.START_TOOLS and jobs._path(request_id).exists():
+        recorded = jobs._read(request_id)
+        operation = "unbake" if tool.name == "unbaking_start" else tool.name.removesuffix("_start")
+        if recorded["operation"] != operation:
+            raise jobs.JobError(
+                "JOB_REQUEST_REUSED",
+                "This request ID already belongs to another native operation",
+                details={"job_id": request_id, "operation": recorded["operation"]},
+            )
+        return jobs.native_job_status(request_id), None
 
     _, _, view, scene = current_context(require_scene=False)
     recovery.guard(tool.name, view, scene)
+    jobs.require_idle(tool.name)
     if tool.name == "scene_save" and recovery.status()["writes_blocked"]:
         target = Path(arguments["path"]).expanduser().resolve()
         if arguments.get("overwrite", False) or target.exists():
@@ -212,9 +226,12 @@ def _execute_write(tool, arguments, request_id):
         "viewport_mode_set",
     }:
         playback.require_idle()
-    managed = tool.name.startswith("recovery_") or tool.name in SESSION_OPERATIONS | OUTPUT_OPERATIONS
+    managed = tool.name.startswith("recovery_") or tool.name in (
+        SESSION_OPERATIONS | OUTPUT_OPERATIONS | jobs.START_TOOLS | jobs.CONTROL_TOOLS
+    )
     if managed:
-        value = _call_handler(tool, arguments)
+        with jobs.request_context(request_id):
+            value = _call_handler(tool, arguments)
         _verify_result(value)
         return value, None
     if scene is None:

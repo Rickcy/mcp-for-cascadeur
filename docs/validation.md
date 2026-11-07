@@ -4,6 +4,22 @@ Local environment: Windows, Cascadeur 2026.2.3 (build 44356), embedded Python
 3.11.0, external Python 3.12.14. Native checks use disposable copies of the
 application's installed samples. No sample assets are distributed here.
 
+## Native workflow probes on 2026-11-07
+
+Additional installed-build checks exercised Motion Generation, reference-video
+import, Mocap, Unbaking and AutoPhysics through native commands and Qt/QML.
+Motion Generation produced a walking clip. Mocap processed 31 synthetic-reference
+frames in 18.378 seconds of recognition time, saved the result and retained exact
+sampled pelvis/foot positions after reopening. Unbaking produced CLAMPED_BEZIER
+intervals, and AutoPhysics changed the clip after its apply dialog was confirmed.
+
+These probes also exposed two native crashes, followed by verified restart
+recovery with zero model differences, and an asynchronous image-capture issue.
+[Native API notes](native-api-notes.md#live-native-workflow-checks) record routes,
+measurements, limitations and the output directory. These experiments use the
+existing optional Python tool and native actions. Dedicated Mocap and Motion
+Generation workflows are planned in [roadmap.md](roadmap.md).
+
 ## Version 0.2 acceptance
 
 The current implementation adds persistent recovery, solver-aware character
@@ -125,6 +141,41 @@ Native readback verifies requested channels, not every solver-coupled control,
 contact, physical plausibility or artistic quality. Arbitrary rigs and every
 interpolation mode have not been accepted. Whole-rig retiming was outside the
 initial release's scope; version 0.2 has a separate checked character retimer.
+
+## Native animation jobs (2026-11-07)
+
+The structured job routes are exercised on Windows with Cascadeur 2026.2.3,
+build 44356, embedded Python 3.11 and Qt 6.5.3. Each run uses a scene copy in the
+configured workspace. Local acceptance evidence is stored beside each result;
+vendor samples, large scenes, videos and the downloaded model are not committed.
+
+| Check | Observed result |
+| --- | --- |
+| Motion Generation | `motion_generation_start(0,30)` generated 1,333 changed Point samples, produced FIXED intervals, committed a fresh 4,103,799-byte `.casc`, and passed complete protection checks across 289 objects, 8,745 channels and 13 tracks. |
+| Mocap | Starting with a one-frame Cascy scene, automatically chose an MP4, imported 31 reference frames, confirmed processing, observed completion and committed a fresh 4,116,477-byte `.casc`. Full protection passed, including the one owned video plane, 87 new channels and two mesh assets. No manual UI step was needed. |
+| Unbaking | Converted generated FIXED intervals to BEZIER/CLAMPED_BEZIER/STEP, held both finger guard keys and committed a 4,095,718-byte native result. The native approximation moved Point samples by up to `4.826861` scene units within the clip; this is measured simplification, not exact motion preservation. |
+| AutoPhysics | Set and read back SelectionEditMode and playback/visible bounds 0–30, observed calculation, confirmed All Frames, measured 1,333 changed Point samples, protected guard frame 31 and committed a 4,116,357-byte native result. |
+| Enabled AutoPhysics | Verified the real toolbar route in both directions, then started a job with the preview already enabled. The job observed OFF, performed a fresh calculation, applied it and committed with all protected checks passing. |
+| Saved curves and poses | Unbaking curves matched the next job's forced disk-loaded input exactly. After AutoPhysics, forced another disk reload: track/curve metadata matched exactly and 129 Point samples differed by at most `0.00000935` scene units. |
+| CLAMPED edit | Authored CLAMPED_BEZIER on 11 native body tracks, then offset all 43 Points by one scene unit at frame 0. Target residual `0.000902`, exact track/curve metadata and static/settings preservation, 32 frames checked; saved natively. |
+| False native postcondition | Unbaking initially changed unkeyed finger values on guard frame 31. The protected-state check rejected it and reopened the immutable source; the complete recorded model matched with zero differences. This motivated explicit guard anchors rather than excluding terminal values from checks. |
+| Process interruption | Terminated the test Cascadeur process after a Mocap job had extended a one-frame scene to 32 frames. With the application stopped, the MCP SDK returned the checksummed durable journal with `connected=false` and unknown execution state. After restarting, `native_job_recover` restored the one-frame source with zero checkpoint differences. |
+| Cancellation | Cancelled a Mocap job during preparation. The importer finished without dispatching inference, the native source reopened, full comparison reported zero differences and the write fence was released. A later process restart confirmed the recorded terminal outcome. |
+
+Native Unbaking output can include FK key metadata. CLAMPED support does not
+relax the existing IK requirement for Point-preserving character edits; an
+ineligible Unbaked scene was rejected and its unchanged checkpoint verified.
+
+The unit and integration checks cover save failure without a fresh result,
+committed receipts surviving final journal/marker failures, cancellation without
+worker-stop proof, damaged checksums, offline MCP fallback and strict protection
+of foreign channels, static data and assets. These checks do not measure visual
+animation quality.
+
+The final local check ran 460 tests covering the changed host modules, dispatch,
+MCP resources/stdio, contracts and installation. Ruff, wheel/sdist builds and an
+isolated `uvx --from <wheel>` tool-discovery check passed. The packaged registry
+contains 103 structured tools plus optional Python; eight tools manage native jobs.
 
 ## Repeating native acceptance
 

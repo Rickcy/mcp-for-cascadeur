@@ -49,6 +49,17 @@ actions report dispatch, not successful completion. Select real track/frame inte
 interval physics or mirror actions. Solvers can change neighboring controls: read back poses,
 inspect edit-impact reports, sample inbetweens and review body/hand PNGs before claiming quality.
 
+Use mocap_start, motion_generation_start, unbaking_start and autophysics_start for
+checked native jobs on supported builds and rigs. Motion Generation fills existing
+endpoint poses; it does not accept text prompts. These tools return a job_id before
+native completion. Poll native_job_status/native_jobs_list for observed stages and
+verified output. Progress can be indeterminate. CLAMPED_BEZIER is supported in the
+classic curve/retiming contracts. A running job owns the scene; native_job_cancel
+requests cancellation and retains the fence until a safe stop and rollback are
+proved. After a process failure, native_job_recover restores the verified source.
+Offline status reads the durable journal and reports unknown execution state;
+never treat a lost connection or a dispatched native action as completed work.
+
 Eligible model edits persist a request_id and recovery checkpoint before mutation. Inspect
 transaction_status after an uncertain response; never blindly retry relative edits or toggles.
 False native postconditions trigger checked rollback. recovery_status reports a persistent
@@ -97,6 +108,55 @@ def _verify_file(result: dict, config: Config, wait: float = 8.0) -> bytes | Non
     return None
 
 
+def _call_with_job_fallback(connection, definition, arguments, config):
+    """Read durable job observations when the native transport cannot answer.
+
+    Only these two read operations have a local substitute. Native validation
+    and recovery failures retain their normal error behavior.
+    """
+    try:
+        return connection.call(definition.name, arguments)
+    except RunnerError as error:
+        unavailable = error.code in {"NOT_CONNECTED", "CONNECTION_LOST", "TIMEOUT", "HTTP_ERROR"}
+        unavailable = unavailable or (
+            error.code == "NATIVE_SCRIPT_FAILED"
+            and "timed out waiting for cascadeur idle event" in str(error).casefold()
+        )
+        if definition.name not in {"native_job_status", "native_jobs_list"} or not unavailable:
+            raise
+        try:
+            definition.validate(arguments)
+        except ValueError as invalid:
+            raise RunnerError("INVALID_ARGUMENTS", str(invalid)) from invalid
+        # Import lazily: the external server never needs csc or Qt to inspect a
+        # persisted job. The helper verifies managed paths and record checksums.
+        from .host import jobs
+
+        try:
+            if definition.name == "native_job_status":
+                result = jobs.read_durable_status(config.workspace, arguments["job_id"])
+            else:
+                result = jobs.read_durable_list(config.workspace, arguments.get("limit", 20))
+        except Exception as failure:
+            raise RunnerError(
+                getattr(failure, "code", "JOB_METADATA_UNREADABLE"),
+                str(failure),
+                getattr(failure, "execution_state", "not_started"),
+                details={"transport_error": error.as_dict()},
+            ) from failure
+        return {
+            "ok": True,
+            "result": result,
+            "execution_state": "completed",
+            "adapter_version": __version__,
+            "executor": "durable_journal",
+            "connected": False,
+            "transport_error": error.as_dict(),
+            "log": "",
+            "messages": [],
+        }
+
+
 def create_server(config: Config, client: RunnerClient | None = None) -> Server:
     connection = client or RunnerClient(config.endpoint, config.workspace, allow_python=config.allow_python)
     tools = registry()
@@ -130,7 +190,13 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
         try:
             if name not in tools:
                 raise RunnerError("UNKNOWN_TOOL", f"Tool is unavailable: {name}")
-            payload = await asyncio.to_thread(connection.call, name, {} if arguments is None else arguments)
+            payload = await asyncio.to_thread(
+                _call_with_job_fallback,
+                connection,
+                tools[name],
+                {} if arguments is None else arguments,
+                config,
+            )
             png = await asyncio.to_thread(_verify_file, payload, config)
             content = [
                 types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, allow_nan=False))

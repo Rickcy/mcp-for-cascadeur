@@ -34,7 +34,7 @@ character retimer and does not establish support for solver-driven rig channels.
 It authors only native local position/rotation/scale inputs and animated
 settings on standalone Basic/Transform objects; native updates produce derived
 world outputs. It retains supported classic section metadata and verifies both
-authored key samples and world poses. CLAMPED, baked/AI intervals, custom tangents
+authored key samples and world poses. Classic intervals include CLAMPED_BEZIER. Baked/AI intervals, custom tangents
 and non-key sections are outside this retiming contract.
 `api_inspect` exposes actual `csc`, `app`, `view`, `scene`, `model` and `layers`
 roots; the last two are the active scene's native viewers. `scene_save` returns
@@ -88,11 +88,37 @@ repeating every large pose. Read actual poses separately when needed.
 Checked character writes require a saved scene, exclusive unlocked character
 tracks, supported native IK/curve state and a complete recovery checkpoint.
 The current verified-contract limit is 121 stored frames. Additive stacks,
-cycles, AI interpolation on character tracks, custom spatial tangents and CLAMPED_BEZIER are rejected
+cycles, AI interpolation on character tracks and custom spatial tangents are rejected
 by the declared preflight. The actual solver result is checked after the native
 transaction commits, including target residuals, connected-body anchors,
 topology, static data, settings and relevant protected channels. Unverified
 postconditions raise an error for the outer recovery transaction.
+
+## Native animation jobs
+
+`mocap_start`, `motion_generation_start`, `unbaking_start` and `autophysics_start`
+return a durable job ID. Use `native_job_status` or `native_jobs_list` for observed
+progress and the checked output. `native_job_cancel` requests a stop;
+`native_job_recover` restores the verified source after an interruption.
+
+These routes target Cascadeur 2026.2.3 build 44356 and the validated native Cascy
+rig, with at most 512 stored frames including a successor guard. Motion Generation
+fills existing endpoint poses; text generation belongs to a separate provider.
+Mocap accepts an MP4 in the workspace or a native video reference. The official
+model must already be cached unless its download was explicitly allowed.
+
+Jobs save an immutable source copy before native work, hold the scene write fence,
+and verify completion markers, poses, editable intervals and the complete protected
+model before saving a new result. Unbaking anchors missing finger guard keys while
+retaining their original values. Native progress is indeterminate where the tool
+exposes no reliable percentage. A lost connection leaves the journal readable but
+does not prove the worker stopped. After restarting Cascadeur, recovery must compare
+the complete checkpoint before releasing the fence. Operation completion does not
+establish artistic quality or physical plausibility.
+
+Unbaking uses the installed native simplification settings and reports measured
+Point displacement. Its `position_tolerance` parameter checks protected positions
+outside the interval; it does not tune the native approximation algorithm.
 
 ## Character curves and retiming
 

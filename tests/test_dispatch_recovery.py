@@ -1,6 +1,7 @@
 """Cross-route fencing and typed recovery errors at the public dispatch boundary."""
 
 import json
+import os
 import re
 import sys
 from contextvars import ContextVar
@@ -12,7 +13,7 @@ import pytest
 
 import mcp_for_cascadeur.host as host
 from mcp_for_cascadeur.contracts import Tool
-from mcp_for_cascadeur.host import playback, recovery
+from mcp_for_cascadeur.host import jobs, playback, recovery
 from mcp_for_cascadeur.runner import RunnerClient, RunnerError
 
 REQUEST_ID = "1" * 32
@@ -20,12 +21,113 @@ WRITE_ROUTES = sorted(name for name, tool in host.registry().items() if not tool
 
 
 @pytest.fixture
-def isolated_dispatch(monkeypatch):
+def isolated_dispatch(monkeypatch, tmp_path):
     view, scene = object(), object()
     monkeypatch.setattr(host, "current_context", lambda require_scene=False: (None, None, view, scene))
     monkeypatch.setattr(playback, "require_idle", Mock())
     monkeypatch.setattr(recovery, "_active", ContextVar("test_dispatch_receipt", default=None))
+    monkeypatch.setattr(recovery, "_root", lambda: tmp_path / "recovery")
     return view, scene
+
+
+@pytest.fixture
+def durable_native_job(isolated_dispatch, monkeypatch):
+    def create(operation):
+        record = {
+            "schema_version": 1,
+            "job_id": REQUEST_ID,
+            "request_id": REQUEST_ID,
+            "operation": operation,
+            "status": "running",
+            "phase": "wait",
+            "host_pid": os.getpid(),
+        }
+        recovery._write(jobs._path(REQUEST_ID), record)
+        recovery._write(
+            recovery._record_path("transactions", REQUEST_ID),
+            {"schema_version": 1, "request_id": REQUEST_ID, "status": "pending"},
+        )
+        monkeypatch.setattr(jobs, "_session", SimpleNamespace(record=record))
+        return record
+
+    return create
+
+
+@pytest.mark.parametrize(
+    "name,operation",
+    [
+        ("mocap_start", "mocap"),
+        ("motion_generation_start", "motion_generation"),
+        ("unbaking_start", "unbake"),
+        ("autophysics_start", "autophysics"),
+    ],
+)
+def test_public_native_start_retry_returns_active_job_before_write_guards(
+    name, operation, durable_native_job, monkeypatch
+):
+    durable_native_job(operation)
+    with pytest.raises(jobs.JobError, match="owns the scene"):
+        jobs.require_idle(name)
+    fence = Mock(side_effect=recovery.RecoveryError("RECOVERY_REQUIRED", "Active job owns the receipt"))
+    idle = Mock(wraps=jobs.require_idle)
+    context = Mock(side_effect=AssertionError("A retry only needs the durable journal"))
+    handler = Mock(side_effect=AssertionError("The native action must not be replayed"))
+    monkeypatch.setattr(recovery, "guard", fence)
+    monkeypatch.setattr(jobs, "require_idle", idle)
+    monkeypatch.setattr(host, "current_context", context)
+    monkeypatch.setattr(host, "_call_handler", handler)
+
+    response = host.dispatch(name, {"first": 0, "last": 30}, request_id=REQUEST_ID)
+
+    assert response["ok"] is True
+    assert response["result"]["job_id"] == REQUEST_ID
+    assert response["result"]["operation"] == operation
+    assert response["result"]["status"] == "running"
+    assert response["result"]["transaction_status"] == "pending"
+    assert jobs._read(REQUEST_ID)["status"] == "running"
+    fence.assert_not_called()
+    idle.assert_not_called()
+    context.assert_not_called()
+    handler.assert_not_called()
+    playback.require_idle.assert_not_called()
+
+
+def test_public_native_start_rejects_request_id_reused_for_another_operation(durable_native_job, monkeypatch):
+    durable_native_job("motion_generation")
+    fence = Mock(side_effect=AssertionError("Identity reuse must be rejected before scene guards"))
+    handler = Mock()
+    monkeypatch.setattr(recovery, "guard", fence)
+    monkeypatch.setattr(host, "_call_handler", handler)
+
+    response = host.dispatch("unbaking_start", {"first": 0, "last": 30}, request_id=REQUEST_ID)
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "JOB_REQUEST_REUSED"
+    assert response["error"]["request_id"] == REQUEST_ID
+    assert response["error"]["execution_state"] == "not_started"
+    assert response["error"]["details"]["operation"] == "motion_generation"
+    assert jobs._read(REQUEST_ID)["operation"] == "motion_generation"
+    fence.assert_not_called()
+    handler.assert_not_called()
+
+
+def test_new_native_start_keeps_global_fence_when_another_request_owns_the_job(
+    isolated_dispatch, durable_native_job, monkeypatch
+):
+    durable_native_job("motion_generation")
+    fence = Mock(side_effect=recovery.RecoveryError("RECOVERY_REQUIRED", "Active job owns the receipt"))
+    handler = Mock()
+    monkeypatch.setattr(recovery, "guard", fence)
+    monkeypatch.setattr(host, "_call_handler", handler)
+    request_id = "2" * 32
+
+    response = host.dispatch("motion_generation_start", {"first": 0, "last": 30}, request_id=request_id)
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "RECOVERY_REQUIRED"
+    fence.assert_called_once_with("motion_generation_start", *isolated_dispatch)
+    assert not jobs._path(request_id).exists()
+    handler.assert_not_called()
 
 
 @pytest.mark.parametrize("name", WRITE_ROUTES)
