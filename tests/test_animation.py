@@ -309,7 +309,7 @@ def native(monkeypatch):
                 Interpolation=SimpleNamespace(
                     __members__={
                         name: NativeEnum(name)
-                        for name in ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP")
+                        for name in ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP", "CLAMPED_BEZIER")
                     }
                 ),
                 IkFk=SimpleNamespace(__members__={"FK": NativeEnum("FK")}),
@@ -511,7 +511,7 @@ def test_key_deletion_validates_all_tracks_before_mutating_any(native):
     assert first.key_frame_indices() == [0, 4, 7]
 
 
-@pytest.mark.parametrize("interpolation", ["CLAMPED_BEZIER", "FIXED", "AI", "NONE"])
+@pytest.mark.parametrize("interpolation", ["FIXED", "AI", "NONE"])
 def test_retime_rejects_unverified_curve_reconstruction_before_native_changes(native, interpolation):
     scene, _, _ = native
     scene.layers.track.sections[4].interval.interpolation = NativeEnum(interpolation)
@@ -520,9 +520,12 @@ def test_retime_rejects_unverified_curve_reconstruction_before_native_changes(na
     assert scene.modify_calls == 0
 
 
-def test_retime_moves_plain_metadata_with_no_detached_native_section_maps(native):
+@pytest.mark.parametrize("interpolation", ["BEZIER", "CLAMPED_BEZIER"])
+def test_retime_moves_plain_metadata_with_no_detached_native_section_maps(native, interpolation):
     scene, _, _ = native
     section = scene.layers.track.sections[4]
+    section.interval.interpolation = NativeEnum(interpolation)
+    section.interval.description_for_ai_interpolation = "authored interval description"
     section.key.label = "authored middle key"
     section.key.left_weight_velocity = 0.23
     section.key.right_weight_velocity = 0.71
@@ -531,6 +534,8 @@ def test_retime_moves_plain_metadata_with_no_detached_native_section_maps(native
     assert moved.key.label == "authored middle key"
     assert moved.key.left_weight_velocity == 0.23
     assert moved.key.right_weight_velocity == 0.71
+    assert moved.interval.interpolation.name == interpolation
+    assert moved.interval.description_for_ai_interpolation == "authored interval description"
     assert result["section_metadata_verified"] is True
 
 
@@ -567,17 +572,34 @@ def test_retime_rejects_incorrect_native_world_output_even_when_authored_data_ma
     assert result["channel_values_verified"] is False
 
 
-def test_retime_cannot_report_success_after_native_metadata_loss(native):
+@pytest.mark.parametrize("loss", ["label", "clamped_mode"])
+def test_retime_cannot_report_success_after_native_metadata_loss(native, loss):
     scene, _, _ = native
+    scene.layers.track.sections[4].interval.interpolation = NativeEnum("CLAMPED_BEZIER")
 
     def interpolator_corrupts_label():
-        scene.layers.track.sections[3].key.label = "lost"
+        if loss == "label":
+            scene.layers.track.sections[3].key.label = "lost"
+        else:
+            scene.layers.track.sections[3].interval.interpolation = NativeEnum("BEZIER")
 
     scene.updater.get_interpolator = lambda: SimpleNamespace(
         reload=lambda: None, interpolate=interpolator_corrupts_label
     )
     with pytest.raises(RuntimeError, match="section metadata differs"):
         animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+
+
+def test_retime_rejects_clamped_enum_unavailable_in_current_native_build_before_mutation(native):
+    from mcp_for_cascadeur.host import state
+
+    scene, csc, _ = native
+    scene.layers.track.sections[4].interval.interpolation = NativeEnum("CLAMPED_BEZIER")
+    del csc.layers.layer.Interpolation.__members__["CLAMPED_BEZIER"]
+    with pytest.raises(state.StateError, match="exact curve metadata"):
+        animation.tracks_retime(["track-uuid"], [0, 4, 7], [0, 3, 7])
+    assert scene.modify_calls == 0
+    assert scene.layers.track.key_frame_indices() == [0, 4, 7]
 
 
 def test_retime_rejects_parent_dependencies_before_modifying(native):

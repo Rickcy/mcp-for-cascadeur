@@ -44,13 +44,8 @@ def verify_supported(scene):
             raise UnsupportedCurveState("Checked recovery does not support animation cycles")
         for frame, section in layer.sections.items():
             interpolation = _name(section.interval.interpolation)
-            if interpolation == "CLAMPED_BEZIER":
-                raise UnsupportedCurveState("Native CLAMPED_BEZIER recovery is unverified; no edit started")
             if interpolation not in {
-                "BEZIER",
-                "LOW_AMPLITUDE_BEZIER",
-                "LINEAR",
-                "STEP",
+                *animation.CLASSIC_INTERPOLATIONS,
                 "FIXED",
                 "NONE",
                 "AI",

@@ -165,12 +165,12 @@ def test_curve_easing_metadata_is_exact_not_numeric_tolerant(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "blocker", ["clamped", "tangents", "cycles", "additive", "missing_key", "baked_edit"]
+    "blocker", ["unknown_interpolation", "tangents", "cycles", "additive", "missing_key", "baked_edit"]
 )
 def test_curve_readiness_rejects_unverified_state_without_checkpoint_capture(monkeypatch, blocker):
     scene, rig, tracks, _, _, vendor = guard_case(monkeypatch)
-    if blocker == "clamped":
-        tracks["b-track"].sections[0].interval.interpolation = enum("CLAMPED_BEZIER")
+    if blocker == "unknown_interpolation":
+        tracks["b-track"].sections[0].interval.interpolation = enum("FUTURE_CURVE_TYPE")
     elif blocker == "tangents":
         tracks["b-track"].sections[0].key.tangents = enum("UserDefined")
     elif blocker == "cycles":
@@ -188,6 +188,34 @@ def test_curve_readiness_rejects_unverified_state_without_checkpoint_capture(mon
     with pytest.raises(curves.UnsupportedCurveState):
         curves.curve_preflight(scene, rig, [2], {"a"})
     assert captured == []
+
+
+@pytest.mark.parametrize("downgrade", [False, True])
+def test_clamped_curve_guard_keeps_the_native_mode_and_all_authored_metadata(monkeypatch, downgrade):
+    from mcp_for_cascadeur.host import state
+
+    scene, rig, tracks, before, after, _ = guard_case(monkeypatch)
+    for identifier in ("a-track", "b-track"):
+        for frame, saved in tracks[identifier].sections.items():
+            saved.interval.interpolation = enum("CLAMPED_BEZIER")
+            saved.interval.common.fixation = enum("Fulcrum")
+            saved.key.label = frame + 10
+            saved.key.left_weight_velocity = 0.31
+            saved.key.right_weight_velocity = 0.67
+        before["tracks"][identifier]["sections"] = {
+            str(frame): state.section_state(saved) for frame, saved in tracks[identifier].sections.items()
+        }
+    after["tracks"] = copy.deepcopy(before["tracks"])
+    guard = curves.CurveProtection.prepare(scene, rig, [2], {"a"})
+    after["channels"]["data:a-pos"]["values"][2][0] += 0.25
+    if downgrade:
+        after["tracks"]["a-track"]["sections"]["2"]["interpolation"] = "BEZIER"
+        with pytest.raises(curves.CharacterVerificationError, match="metadata"):
+            guard.verify(scene)
+    else:
+        result = guard.verify(scene)
+        assert result["track_and_curve_metadata"] == "exact"
+        assert result["trajectory_shape_preserved"] is False
 
 
 def test_quaternion_anchor_rotation_matches_quarter_turn():

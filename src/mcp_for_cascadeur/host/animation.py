@@ -22,6 +22,7 @@ from .motion import (
 _snapshots = {}
 MAX_SNAPSHOTS = 32
 INTERPOLATIONS = ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP", "FIXED", "CLAMPED_BEZIER")
+CLASSIC_INTERPOLATIONS = tuple(name for name in INTERPOLATIONS if name != "FIXED")
 
 
 @contextmanager
@@ -352,11 +353,11 @@ def tracks_retime(tracks, source_frames, target_frames):
                 "Retiming requires only the listed key sections; fixed/non-key sections need explicit resampling"
             )
         if any(
-            section.interval.interpolation.name not in ("LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER", "STEP")
+            section.interval.interpolation.name not in CLASSIC_INTERPOLATIONS
             for section in track.sections.values()
         ):
             raise ValueError(
-                "Retiming supports LINEAR/BEZIER/LOW_AMPLITUDE_BEZIER/STEP; FIXED, AI and CLAMPED curves need a separately verified workflow"
+                "Retiming supports classic keyed interpolation, including CLAMPED_BEZIER; FIXED, AI and NONE need a separately verified workflow"
             )
         if any(
             section.key is None or section.key.tangents.name != "Continuous"
@@ -392,6 +393,9 @@ def tracks_retime(tracks, source_frames, target_frames):
                     settings[reference] = [data.get_setting_value(reference, frame) for frame in source]
     if (len(values) + len(settings)) * len(source) > 16384:
         raise ValueError("Retiming exceeds 16384 channel-key samples; select fewer tracks")
+    for replacements in sections.values():
+        for metadata in replacements.values():
+            state.validate_section_metadata(metadata)
 
     def apply(model, updater):
         editor, layer_editor = model.data_editor(), model.layers_editor()

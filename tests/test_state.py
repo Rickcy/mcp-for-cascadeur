@@ -231,6 +231,129 @@ def test_euler_turn_count_does_not_gain_relative_tolerance_at_large_angles():
     assert not state.equivalent_values(first, other_turn)
 
 
+@pytest.fixture
+def derived_angle_case():
+    before = checkpoint()
+    channel = before["channels"]["data:position"]
+    channel["name"] = "Angle Rotation"
+    rotation = state.encode(EulerRotation(0.25))
+    channel["values"] = [copy.deepcopy(rotation), copy.deepcopy(rotation)]
+    after = copy.deepcopy(before)
+    after["channels"]["data:position"]["values"][0]["euler_radians"][0] += 2 * math.pi
+    return before, after
+
+
+@pytest.mark.parametrize(
+    "frame,euler_before,quaternion_before,euler_after,quaternion_after",
+    [
+        (
+            1,
+            [3.1272382736206055, -3.1415927410125732, -3.1415927410125732],
+            [0.999974250793457, -0.007177128456532955, 4.339653969509527e-08, -4.402398445790823e-08],
+            [3.127237319946289, -3.141592502593994, 3.1415927410125732],
+            [0.999974250793457, -0.007177605293691158, -7.518221423197247e-08, 4.425215749392919e-08],
+        ),
+        (
+            10,
+            [2.6741714477539062, 3.141592502593994, -3.1415927410125732],
+            [0.9728137850761414, -0.23158884048461914, 6.33223322665799e-08, -6.000750829571189e-08],
+            [2.674170970916748, -3.141592502593994, 3.141592502593994],
+            [0.9728137254714966, -0.23158906400203705, -9.092988051406792e-08, -5.59609034667119e-08],
+        ),
+        (
+            12,
+            [3.14143705368042, 3.1415927410125732, 3.1401376724243164],
+            [0.9999997615814209, -7.779990119161084e-05, -1.0031010333477752e-07, -0.000727490521967411],
+            [3.141436815261841, -3.141592502593994, 3.140137195587158],
+            [0.9999997615814209, -7.791908137733117e-05, -1.3220190453466785e-07, -0.0007277289405465126],
+        ),
+    ],
+)
+def test_recovery_comparison_accepts_saved_native_unbound_point_angle_outputs_at_any_frame(
+    derived_angle_case, frame, euler_before, quaternion_before, euler_after, quaternion_after
+):
+    # Native save/reopen rows from Unbaking toe/neck Point solver outputs.
+    before, after = derived_angle_case
+    old = {"__native__": "rotation", "euler_radians": euler_before, "quaternion_wxyz": quaternion_before}
+    new = {"__native__": "rotation", "euler_radians": euler_after, "quaternion_wxyz": quaternion_after}
+    for snapshot in (before, after):
+        snapshot["count"] = 14
+        snapshot["channels"]["data:position"]["values"] = [copy.deepcopy(old) for _ in range(14)]
+    after["channels"]["data:position"]["values"][frame] = new
+    original = copy.deepcopy((before, after))
+
+    assert not state.equivalent_values(old, new)
+    assert not state.channel_equal(before["channels"]["data:position"], after["channels"]["data:position"])
+    assert state.compare(before, after)["equivalent"]
+    assert state.compare(after, before)["equivalent"]
+    assert (before, after) == original
+
+
+@pytest.mark.parametrize(
+    "name,kind",
+    [("Local Rotation", "DataType"), ("Angle Rotation", "DataType"), ("Angle Rotation", "DataRangeType")],
+)
+def test_recovery_comparison_keeps_bound_authored_rotation_winding_strict(derived_angle_case, name, kind):
+    before, after = derived_angle_case
+    reference = {"__native__": "id", "value": "position"}
+    for snapshot in (before, after):
+        snapshot["channels"]["data:position"]["name"] = name
+        snapshot["objects"]["object"]["behaviours"]["authored"] = {
+            "name": "Transform",
+            "properties": {
+                "local_rotation": {"kind": kind, "value": [reference] if "Range" in kind else reference}
+            },
+        }
+    proof = state.compare(before, after)
+    assert not proof["equivalent"]
+    assert proof["differences"] == [{"path": "channels/data:position", "reason": "channel state differs"}]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["quaternion", "one_radian", "other_name", "owner_type", "metadata", "static", "setting", "extra_field"],
+)
+def test_recovery_periodic_equivalence_cannot_hide_authored_or_structural_changes(derived_angle_case, case):
+    before, after = derived_angle_case
+    if case == "quaternion":
+        after["channels"]["data:position"]["values"][0]["quaternion_wxyz"][0] += 0.001
+    elif case == "one_radian":
+        after["channels"]["data:position"]["values"][0]["euler_radians"][0] += 1.0
+    elif case == "metadata":
+        after["channels"]["data:position"]["description"] = {"label": "new"}
+    elif case == "extra_field":
+        before["channels"]["data:position"]["values"][0]["extra"] = 1.0
+        after["channels"]["data:position"]["values"][0]["extra"] = 1.0 + 1e-10
+    else:
+        for snapshot in (before, after):
+            channel = snapshot["channels"]["data:position"]
+            if case == "other_name":
+                channel["name"] = "Local Rotation"
+            elif case == "owner_type":
+                snapshot["objects"]["object"]["type"] = "Joint"
+            elif case == "static":
+                channel["mode"] = "Static"
+                channel["value"] = channel.pop("values")[0]
+            elif case == "setting":
+                channel["kind"] = "setting"
+                channel["setting_type"] = 0
+                snapshot["channels"]["setting:position"] = snapshot["channels"].pop("data:position")
+    assert not state.compare(before, after)["equivalent"]
+
+
+def test_removing_a_binding_cannot_make_authored_rotation_equivalent_to_derived_output(derived_angle_case):
+    before, after = derived_angle_case
+    before["objects"]["object"]["behaviours"]["authored"] = {
+        "name": "Transform",
+        "properties": {
+            "local_rotation": {"kind": "DataType", "value": {"__native__": "id", "value": "position"}}
+        },
+    }
+    proof = state.compare(before, after)
+    assert not proof["equivalent"]
+    assert {item["path"] for item in proof["differences"]} == {"channels/data:position", "objects"}
+
+
 def test_old_quaternion_only_checkpoint_compares_with_new_euler_records_without_losing_other_metadata():
     modern = checkpoint()
     rotation = state.encode(EulerRotation(2 * math.pi + 0.25))
@@ -378,10 +501,13 @@ def test_manual_restore_writes_all_frames_and_static_settings_then_compares_comp
     assert model["channels"]["setting:mode"]["value"] is False
 
 
-def test_manual_track_restore_uses_native_key_helpers_and_scalar_metadata_not_detached_sections(monkeypatch):
+@pytest.mark.parametrize("interpolation", ["BEZIER", "CLAMPED_BEZIER"])
+def test_manual_track_restore_uses_native_key_helpers_and_scalar_metadata_not_detached_sections(
+    monkeypatch, interpolation
+):
     def metadata(weight):
         return {
-            "interpolation": "BEZIER",
+            "interpolation": interpolation,
             "interval_common": {"ik_fk": "IK", "fixation": "Free"},
             "ai_description": "authored interval",
             "key": {
@@ -418,6 +544,9 @@ def test_manual_track_restore_uses_native_key_helpers_and_scalar_metadata_not_de
     actual["tracks"]["track"]["sections"]["1"] = metadata(9.0)
     actual["tracks"]["track"]["keys"] = [0, 1, 3]
     actual["tracks"]["track"]["sections"]["0"] = metadata(8.0)
+    actual["tracks"]["track"]["sections"]["0"]["interpolation"] = (
+        "BEZIER" if interpolation == "CLAMPED_BEZIER" else "CLAMPED_BEZIER"
+    )
     calls = []
 
     def enum(name):
@@ -427,7 +556,7 @@ def test_manual_track_restore_uses_native_key_helpers_and_scalar_metadata_not_de
         **{
             name: SimpleNamespace(__members__={item: enum(item) for item in values})
             for name, values in {
-                "Interpolation": ["BEZIER"],
+                "Interpolation": ["BEZIER", "CLAMPED_BEZIER"],
                 "IkFk": ["IK"],
                 "Fixation": ["Free"],
                 "Tangents": ["Continuous"],
@@ -506,6 +635,41 @@ def test_manual_track_restore_uses_native_key_helpers_and_scalar_metadata_not_de
     assert state.restore(scene, wanted)["restored"]
     assert actual == wanted
     assert ("native_key", 2) in calls and ("unset", 1) in calls
+
+
+def test_saved_curve_type_unavailable_in_native_build_never_reaches_track_mutation(monkeypatch):
+    metadata = {
+        "interpolation": "CLAMPED_BEZIER",
+        "interval_common": {"ik_fk": "IK", "fixation": "Free"},
+        "ai_description": "legacy saved interval",
+        "key": None,
+    }
+    wanted = {
+        "format_version": 1,
+        "count": 2,
+        "objects": {},
+        "channels": {},
+        "auxiliary": {},
+        "external": {},
+        "tracks": {
+            "track": {
+                "objects": [],
+                "keys": [],
+                "cycles": [],
+                "sections": {"0": metadata},
+            }
+        },
+    }
+    actual = copy.deepcopy(wanted)
+    actual["tracks"]["track"]["sections"]["0"]["interpolation"] = "BEZIER"
+    native = SimpleNamespace(Interpolation=SimpleNamespace(__members__={"BEZIER": object()}))
+    monkeypatch.setitem(sys.modules, "csc", SimpleNamespace(layers=SimpleNamespace(layer=native)))
+    monkeypatch.setattr(state, "capture", lambda _: copy.deepcopy(actual))
+    scene = SimpleNamespace(modify_update=lambda *args: pytest.fail("Unavailable curve must not be edited"))
+    with pytest.raises(state.StateError, match="exact curve metadata") as caught:
+        state.restore(scene, wanted)
+    assert caught.value.code == "UNSUPPORTED_SECTION_RESTORE"
+    assert caught.value.execution_state == "not_started"
 
 
 @pytest.fixture
@@ -629,6 +793,36 @@ def test_character_restore_authors_points_finger_locals_settings_and_regenerates
     assert solves == [({"p"}, 0), ({"f"}, 0)]
 
 
+def test_format_one_character_checkpoint_recovers_with_clamped_curves_and_exact_metadata(authored_character):
+    scene, wanted, actual, writes, solves = authored_character
+    metadata = {
+        "interpolation": "CLAMPED_BEZIER",
+        "interval_common": {"ik_fk": "IK", "fixation": "Fulcrum"},
+        "ai_description": "original clamp interval",
+        "key": {
+            "common": {"ik_fk": "IK", "fixation": "Free"},
+            "label": 7,
+            "tangents": "Continuous",
+            "left_weight_velocity": 0.31,
+            "right_weight_velocity": 0.67,
+        },
+    }
+    wanted["tracks"]["body"] = {
+        "objects": ["point"],
+        "keys": [0],
+        "sections": {"0": metadata},
+        "cycles": [],
+    }
+    actual["tracks"] = copy.deepcopy(wanted["tracks"])
+    result = state.restore(scene, wanted)
+    assert result["verification"]["equivalent"]
+    assert actual == wanted
+    assert actual["format_version"] == 1
+    assert actual["tracks"]["body"]["sections"]["0"] == metadata
+    assert set(writes) == {("p", 0), ("f", 0)}
+    assert solves == [({"p"}, 0), ({"f"}, 0)]
+
+
 def test_manual_restore_registers_one_fresh_native_history_state_and_accepts_only_after_verification(
     authored_character, monkeypatch
 ):
@@ -714,13 +908,13 @@ def test_unknown_constrained_animation_restore_fails_closed_before_mutation(monk
         state.restore(scene, wanted)
 
 
-@pytest.mark.parametrize("unsupported", ["clamped", "custom_tangents", "point_fk"])
+@pytest.mark.parametrize("unsupported", ["custom_tangents", "point_fk"])
 def test_character_restore_rejects_unverified_checkpoint_curves_before_mutation(
     authored_character, unsupported
 ):
     scene, wanted, actual, writes, solves = authored_character
     section = {
-        "interpolation": "CLAMPED_BEZIER" if unsupported == "clamped" else "BEZIER",
+        "interpolation": "BEZIER",
         "interval_common": {"ik_fk": "FK" if unsupported == "point_fk" else "IK", "fixation": "Free"},
         "ai_description": "",
         "key": {

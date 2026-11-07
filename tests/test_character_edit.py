@@ -296,6 +296,7 @@ def native(monkeypatch):
                     LINEAR=enum("LINEAR"),
                     BEZIER=enum("BEZIER"),
                     LOW_AMPLITUDE_BEZIER=enum("LOW_AMPLITUDE_BEZIER"),
+                    CLAMPED_BEZIER=enum("CLAMPED_BEZIER"),
                     FIXED=enum("FIXED"),
                 ),
                 IkFk=SimpleNamespace(IK=enum("IK"), FK=enum("FK")),
@@ -305,6 +306,9 @@ def native(monkeypatch):
             CyclesViewer=lambda track: SimpleNamespace(any_cycles_exist_in_frames=lambda a, b: False),
         ),
     )
+    for name in ("Interpolation", "IkFk", "Fixation", "Tangents"):
+        values = getattr(vendor.layers.layer, name)
+        values.__members__ = vars(values).copy()
     monkeypatch.setitem(sys.modules, "csc", vendor)
     monkeypatch.setitem(
         sys.modules, "numpy", SimpleNamespace(asarray=lambda value, dtype: list(value), float32=float)
@@ -319,8 +323,12 @@ def native(monkeypatch):
     return scene, rig
 
 
-def test_character_retime_stages_authored_sources_and_preserves_key_metadata(native):
+@pytest.mark.parametrize("interpolation", ["BEZIER", "CLAMPED_BEZIER"])
+def test_character_retime_stages_authored_sources_and_preserves_key_metadata(native, interpolation):
     scene, _ = native
+    for identifier in ("point-track", "finger-track"):
+        for section in scene.tracks[identifier].sections.values():
+            section.interval.interpolation = enum(interpolation)
     old_metadata = checkpoint(scene)["tracks"]["point-track"]["sections"]["2"]
     result = character_edit.character_retime(
         "rig", [{"source": 0, "target": 0}, {"source": 2, "target": 1}, {"source": 4, "target": 4}]
@@ -336,22 +344,73 @@ def test_character_retime_stages_authored_sources_and_preserves_key_metadata(nat
     assert not any(frame == 4 for _, _, frame in scene.data.writes)
 
 
-def test_retime_explicit_easing_changes_only_requested_metadata(native):
+@pytest.mark.parametrize("interpolation", ["LINEAR", "CLAMPED_BEZIER"])
+def test_retime_explicit_easing_changes_only_requested_metadata(native, interpolation):
     scene, _ = native
     character_edit.character_retime(
         "rig",
         [
             {"source": 0, "target": 0},
-            {"source": 2, "target": 1, "interpolation": "LINEAR", "left_weight": 0.3, "right_weight": 0.7},
+            {
+                "source": 2,
+                "target": 1,
+                "interpolation": interpolation,
+                "left_weight": 0.3,
+                "right_weight": 0.7,
+            },
             {"source": 4, "target": 4},
         ],
     )
     moved = scene.tracks["point-track"].sections[1]
-    assert moved.interval.interpolation.name == "LINEAR"
+    assert moved.interval.interpolation.name == interpolation
     assert moved.key.left_weight_velocity == 0.3
     assert moved.key.right_weight_velocity == 0.7
     assert moved.key.label == 7
     assert moved.interval.description_for_ai_interpolation == "original interpolation description"
+
+
+def test_retime_rejects_a_native_downgrade_of_clamped_interpolation(native):
+    scene, _ = native
+    for section in scene.tracks["point-track"].sections.values():
+        section.interval.interpolation = enum("CLAMPED_BEZIER")
+    original = scene.modify_update
+
+    def native_downgrade(label, callback):
+        accepted = original(label, callback)
+        scene.tracks["point-track"].sections[1].interval.interpolation = enum("BEZIER")
+        return accepted
+
+    scene.modify_update = native_downgrade
+    with pytest.raises(curves.CharacterVerificationError, match="metadata"):
+        character_edit.character_retime(
+            "rig", [{"source": 0, "target": 0}, {"source": 2, "target": 1}, {"source": 4, "target": 4}]
+        )
+    assert scene.modifications == 1
+
+
+def test_retime_validates_requested_clamped_support_before_removing_native_keys(native):
+    scene, _ = native
+    del sys.modules["csc"].layers.layer.Interpolation.__members__["CLAMPED_BEZIER"]
+    before = checkpoint(scene)
+    with pytest.raises(state.StateError, match="exact curve metadata"):
+        character_edit.character_retime(
+            "rig",
+            [
+                {"source": 0, "target": 0},
+                {"source": 2, "target": 1, "interpolation": "CLAMPED_BEZIER"},
+                {"source": 4, "target": 4},
+            ],
+        )
+    assert scene.modifications == 0
+    assert scene.data.writes == []
+    assert checkpoint(scene) == before
+
+
+def test_retime_schema_advertises_native_clamped_without_baked_or_ai_modes():
+    tool = next(tool for tool in character_edit.TOOLS if tool.name == "character_retime")
+    modes = tool.properties["keys"]["items"]["properties"]["interpolation"]["enum"]
+    assert "CLAMPED_BEZIER" in modes
+    assert not {"FIXED", "AI", "NONE"}.intersection(modes)
 
 
 @pytest.mark.parametrize("collapse_branch", [False, True])
@@ -433,8 +492,11 @@ def test_curve_preserving_terminal_edit_is_rejected_before_native_mutation(nativ
     assert scene.data.writes == []
 
 
-def test_curve_preserving_pose_keeps_easing_and_baked_external_samples(native):
+@pytest.mark.parametrize("interpolation", ["BEZIER", "CLAMPED_BEZIER"])
+def test_curve_preserving_pose_keeps_easing_and_baked_external_samples(native, interpolation):
     scene, _ = native
+    for section in scene.tracks["point-track"].sections.values():
+        section.interval.interpolation = enum(interpolation)
     before = checkpoint(scene)
     result = character_edit.character_pose_preserving_curves(
         "rig", [{"frame": 2, "poses": [{"object": "point", "position": [20.5, 1, 2]}]}]

@@ -151,10 +151,37 @@ def section_state(section):
     }
 
 
+def validate_section_metadata(value):
+    """Resolve serialized enum names before touching a native track or section.
+
+    Format-1 checkpoints already store CLAMPED_BEZIER by its native name. Keep
+    that representation intact and fail before mutation on older native builds
+    that cannot recreate a saved enum; never substitute a different curve type.
+    """
+    import csc
+
+    try:
+        native = csc.layers.layer
+        native.Interpolation.__members__[value["interpolation"]]
+        native.IkFk.__members__[value["interval_common"]["ik_fk"]]
+        native.Fixation.__members__[value["interval_common"]["fixation"]]
+        saved = value["key"]
+        if saved is not None:
+            native.IkFk.__members__[saved["common"]["ik_fk"]]
+            native.Fixation.__members__[saved["common"]["fixation"]]
+            native.Tangents.__members__[saved["tangents"]]
+    except (AttributeError, KeyError, TypeError) as error:
+        raise StateError(
+            "UNSUPPORTED_SECTION_RESTORE",
+            "The native build cannot restore the checkpoint's exact curve metadata",
+        ) from error
+
+
 def apply_section_metadata(result, value):
     """Edit an existing native section; never build detached C++ section wrappers."""
     import csc
 
+    validate_section_metadata(value)
     native = csc.layers.layer
     saved = value["key"]
     if (saved is None) != (result.key is None):
@@ -508,13 +535,98 @@ def channel_equal(first, second):
     return equivalent_values(first.get(values), second.get(values), exact=exact)
 
 
+def unbound_angle_output(channel, objects):
+    """Identify derived Point angle data without an authored behaviour binding."""
+    if (
+        channel.get("kind") != "data"
+        or channel.get("mode") != "Animation"
+        or channel.get("name") != "Angle Rotation"
+        or not channel.get("id")
+    ):
+        return False
+    owner = objects.get(channel.get("owner"), {})
+    if owner.get("type") != "Point":
+        return False
+
+    def references(value):
+        if isinstance(value, dict):
+            if value.get("__native__") == "id" and value.get("value") == channel["id"]:
+                return True
+            return any(references(item) for item in value.values())
+        if isinstance(value, list):
+            return any(references(item) for item in value)
+        return False
+
+    return not any(references(item.get("properties", {})) for item in owner.get("behaviours", {}).values())
+
+
+def periodic_rotation_equal(expected, actual):
+    """Compare periodic derived Euler output while retaining quaternion checks."""
+    if (
+        type(expected) is not dict
+        or type(actual) is not dict
+        or expected.keys() != actual.keys()
+        or expected.get("__native__") != "rotation"
+        or actual.get("__native__") != "rotation"
+    ):
+        return False
+    left, right = expected.get("euler_radians"), actual.get("euler_radians")
+    if (
+        type(left) is not list
+        or type(right) is not list
+        or len(left) != 3
+        or len(right) != 3
+        or any(type(value) not in (int, float) or not math.isfinite(value) for value in (*left, *right))
+    ):
+        return False
+    ignored = {"euler_radians", "quaternion_wxyz"}
+    if not all(
+        equivalent_values(value, actual[key], exact=True)
+        for key, value in expected.items()
+        if key not in ignored
+    ):
+        return False
+    if not equivalent_values(
+        {key: value for key, value in expected.items() if key != "euler_radians"},
+        {key: value for key, value in actual.items() if key != "euler_radians"},
+    ):
+        return False
+    return all(
+        abs(math.atan2(math.sin(a - b), math.cos(a - b))) <= ROTATION_TOLERANCE for a, b in zip(left, right)
+    )
+
+
+def _derived_channel_equal(left, right, expected_objects, actual_objects):
+    if not equivalent_values(
+        {key: value for key, value in left.items() if key != "values"},
+        {key: value for key, value in right.items() if key != "values"},
+        exact=True,
+    ):
+        return False
+    if not unbound_angle_output(left, expected_objects) or not unbound_angle_output(right, actual_objects):
+        return False
+    old, new = left.get("values"), right.get("values")
+    if type(old) is not list or type(new) is not list or len(old) != len(new):
+        return False
+    return all(equivalent_values(a, b) or periodic_rotation_equal(a, b) for a, b in zip(old, new))
+
+
 def compare(expected, actual):
     differences = []
     for key in sorted(set(expected) | set(actual)):
         if key == "channels":
             for identifier in sorted(set(expected.get(key, {})) | set(actual.get(key, {}))):
                 left, right = expected.get(key, {}).get(identifier), actual.get(key, {}).get(identifier)
-                if left is None or right is None or not channel_equal(left, right):
+                if (
+                    left is None
+                    or right is None
+                    or not (
+                        channel_equal(left, right)
+                        or _derived_channel_equal(
+                            left, right, expected.get("objects", {}), actual.get("objects", {})
+                        )
+                    )
+                ):
                     differences.append({"path": f"channels/{identifier}", "reason": "channel state differs"})
         elif not equivalent_values(expected.get(key), actual.get(key), exact=True):
             differences.append({"path": key, "reason": "exact metadata differs"})
@@ -527,6 +639,7 @@ def compare(expected, actual):
             "rotation_absolute": ROTATION_TOLERANCE,
             "native_euler_absolute": ROTATION_TOLERANCE,
             "native_euler_relative": 0.0,
+            "unbound_point_angle_euler": "periodic; quaternion tolerance unchanged",
             "relative": 1e-6,
             "static_settings_metadata": "exact",
         },
@@ -617,12 +730,10 @@ def _restore_authoring_plan(scene, checkpoint, before):
             )
         for track in checkpoint["tracks"].values():
             for section in track["sections"].values():
-                if section["interpolation"] == "CLAMPED_BEZIER" or (
-                    section["key"] is not None and section["key"]["tangents"] != "Continuous"
-                ):
+                if section["key"] is not None and section["key"]["tangents"] != "Continuous":
                     raise StateError(
                         "UNSUPPORTED_AUTHORED_RESTORE",
-                        "Checkpoint curves require unverified native interpolation or custom tangents",
+                        "Checkpoint curves require unverified custom tangents",
                     )
     for identifier in rig_ids:
         from .characters import resolve_character
@@ -752,6 +863,10 @@ def restore(scene, checkpoint):
             "UNSUPPORTED_STATE_RESTORE",
             "Manual restoration of additive stacks or cycles is not supported; checked native Undo is required",
         )
+    for identifier, track in checkpoint["tracks"].items():
+        if track != before["tracks"][identifier]:
+            for metadata in track["sections"].values():
+                validate_section_metadata(metadata)
     authoring = _restore_authoring_plan(scene, checkpoint, before)
     model, data = scene.model_viewer(), scene.data_viewer()
     objects = {_identifier(item): item for item in model.get_objects()}

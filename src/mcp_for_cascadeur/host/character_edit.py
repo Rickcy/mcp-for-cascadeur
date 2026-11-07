@@ -10,6 +10,8 @@ from . import animation, curves
 from .common import current_context, modify, resolve_object
 from .motion import checked_sequence, finite_vector
 
+RETIME_INTERPOLATIONS = tuple(name for name in animation.CLASSIC_INTERPOLATIONS if name != "STEP")
+
 
 def _resolve(scene, identifier, *, semantics=False, hands=False):
     from .characters import resolve_character
@@ -226,12 +228,8 @@ def _key_map(scene, keys):
             raise ValueError("Each retime key requires source and target plus optional interpolation/easing")
         source = animation._existing_frame(scene, key["source"])
         target = animation._existing_frame(scene, key["target"])
-        if "interpolation" in key and key["interpolation"] not in {
-            "LINEAR",
-            "BEZIER",
-            "LOW_AMPLITUDE_BEZIER",
-        }:
-            raise ValueError("Retiming supports LINEAR, BEZIER and LOW_AMPLITUDE_BEZIER intervals")
+        if "interpolation" in key and key["interpolation"] not in RETIME_INTERPOLATIONS:
+            raise ValueError("Retiming supports " + ", ".join(RETIME_INTERPOLATIONS) + " intervals")
         for field in ("left_weight", "right_weight"):
             if field in key and (
                 type(key[field]) not in (int, float)
@@ -273,23 +271,6 @@ def _retime_tracks(scene, rig, keys):
             ):
                 raise curves.UnsupportedCurveState("Body Point tracks require native IK mode for retiming")
     return tracks
-
-
-def _restore_section_fields(csc, section, record):
-    from . import state
-
-    native = csc.layers.layer
-    section.interval.interpolation = getattr(native.Interpolation, record["interpolation"])
-    section.interval.common.ik_fk = getattr(native.IkFk, record["interval_common"]["ik_fk"])
-    section.interval.common.fixation = getattr(native.Fixation, record["interval_common"]["fixation"])
-    section.interval.description_for_ai_interpolation = record["ai_description"]
-    key = record["key"]
-    section.key.common.ik_fk = getattr(native.IkFk, key["common"]["ik_fk"])
-    section.key.common.fixation = getattr(native.Fixation, key["common"]["fixation"])
-    section.key.label = state.decode(key["label"])
-    section.key.tangents = getattr(native.Tangents, key["tangents"])
-    section.key.left_weight_velocity = key["left_weight_velocity"]
-    section.key.right_weight_velocity = key["right_weight_velocity"]
 
 
 def _contact_interval_mode(first, last):
@@ -406,6 +387,9 @@ def character_retime(character_id, keys, stabilize_contacts=False):
     }
     expected_tracks = _retime_expected_tracks(before, tracks, mapping, foot_tracks)
     staged_tracks = _retime_expected_tracks(before, tracks, mapping, set())
+    for identifier in tracks:
+        for metadata in staged_tracks[str(identifier)]["sections"].values():
+            state.validate_section_metadata(metadata)
     protected = {
         key
         for key, record in before["channels"].items()
@@ -431,7 +415,7 @@ def character_retime(character_id, keys, stabilize_contacts=False):
                 metadata = staged_tracks[str(identifier)]["sections"][str(frame)]
 
                 def configure(section, metadata=metadata):
-                    _restore_section_fields(csc, section, metadata)
+                    state.apply_section_metadata(section, metadata)
 
                 with animation._native_step(
                     f"restore retimed key metadata on track {identifier}, frame {frame}"
@@ -619,7 +603,7 @@ KEY_MAPPING = {
         "properties": {
             "source": animation.FRAME,
             "target": animation.FRAME,
-            "interpolation": {"type": "string", "enum": ["LINEAR", "BEZIER", "LOW_AMPLITUDE_BEZIER"]},
+            "interpolation": {"type": "string", "enum": list(RETIME_INTERPOLATIONS)},
             "left_weight": {"type": "number", "minimum": 0.01, "maximum": 0.99},
             "right_weight": {"type": "number", "minimum": 0.01, "maximum": 0.99},
         },
