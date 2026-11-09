@@ -1,0 +1,116 @@
+name: cascadeur-kimodo
+
+x-runtime: &runtime
+  image: mcp-for-cascadeur-kimodo:1.2.0-cu126
+  platform: linux/amd64
+  build:
+    context: ../..
+    dockerfile: integrations/kimodo/Dockerfile
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  shm_size: 1gb
+  tmpfs:
+    - /tmp:size=2g
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "2"
+
+x-environment: &environment
+  NVIDIA_DRIVER_CAPABILITIES: compute,utility
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  HF_HOME: /runtime/huggingface
+  HF_HUB_CACHE: /models/.hf-cache/hub
+  HUGGINGFACE_HUB_CACHE: /models/.hf-cache/hub
+  HF_MODULES_CACHE: /runtime/huggingface/modules
+  HOME: /runtime
+  XDG_CACHE_HOME: /runtime/cache
+  TORCH_HOME: /runtime/torch
+  TORCHINDUCTOR_CACHE_DIR: /runtime/torchinductor
+  TRITON_CACHE_DIR: /runtime/triton
+  MPLCONFIGDIR: /runtime/matplotlib
+  TEXT_ENCODERS_DIR: /models/text-encoders
+  CHECKPOINT_DIR: /models/checkpoints
+  KIMODO_DATA_ROOT: /opt/kimodo
+  KIMODO_RUNTIME_DIR: /runtime
+  KIMODO_EXCHANGE_ROOT: /exchange
+  TEXT_ENCODER_ALLOW_FALLBACK: "0"
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  GRADIO_ANALYTICS_ENABLED: "False"
+
+services:
+  text-encoder:
+    <<: *runtime
+    command: [python, -m, kimodo.scripts.run_text_encoder_server]
+    environment:
+      <<: *environment
+      TEXT_ENCODER_MODEL_PATH: /models/text-encoders/generated/LLM2Vec-Meta-Llama-3-8B-Instruct-merged
+      TEXT_ENCODER_QUANTIZATION: 4bit
+      TEXT_ENCODER_SERVER_MODE: api
+      GRADIO_SERVER_NAME: 0.0.0.0
+      GRADIO_SERVER_PORT: "9550"
+      TEXT_ENCODER_TMP_FOLDER: /runtime/text-encoder-tmp
+    volumes:
+      - type: bind
+        source: ${KIMODO_MODELS_DIR:?Run kimodo.ps1 to set the models directory}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - encoder-runtime:/runtime
+    healthcheck:
+      test: [CMD, python, -c, "import json, urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:9550/health', timeout=5)); assert d.get('encoder_kind') == 'llm2vec' and d.get('quantization') == '4bit', d"]
+      interval: 5s
+      timeout: 10s
+      start_period: 120s
+      retries: 120
+
+  backend:
+    <<: *runtime
+    environment:
+      <<: *environment
+      TEXT_ENCODER_MODE: api
+      TEXT_ENCODER_URL: http://text-encoder:9550/
+      KIMODO_FBX_FAST_ARMATURE: "1"
+      KIMODO_FBX_FAST_ONLY: "1"
+    ports:
+      - "127.0.0.1:${KIMODO_BACKEND_PORT:-9552}:9552"
+    volumes:
+      - type: bind
+        source: ${KIMODO_MODELS_DIR:?Run kimodo.ps1 to set the models directory}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KIMODO_EXCHANGE_DIR:?Run kimodo.ps1 to set the exchange directory}
+        target: /exchange
+        bind:
+          create_host_path: false
+      - backend-runtime:/runtime
+    depends_on:
+      text-encoder:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import json, urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:9552/health', timeout=5)); assert d.get('ready') is True, d"]
+      interval: 5s
+      timeout: 10s
+      start_period: 120s
+      retries: 120
+
+volumes:
+  encoder-runtime:
+  backend-runtime:
