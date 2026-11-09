@@ -86,6 +86,29 @@ def motion_from_constraints(template, converted):
 
 
 class KeyposeConversionTests(unittest.TestCase):
+    def test_offset_pelvis_joint_does_not_shift_native_point_constraints(self):
+        calibration, template = fixture()
+        # UE rigs can place the pelvis Point below the pelvis Joint. The
+        # Point-to-SOMA-to-Point route must preserve the controller's world pose.
+        calibration["joints"]["pelvis"]["position"] = points._add(
+            calibration["points"]["pelvis_MainPoint"]["position"], [0.4, 2.5692368, -0.12])
+        captured = snapshot(calibration, offset=[30, 17, 205], frames=[40, 279])
+        converted = keyposes.convert(captured, calibration, template)
+        self.assertEqual(converted["num_frames"], 240)
+        self.assertEqual(converted["frame_indices"], [0, 239])
+        report = keyposes.conversion_roundtrip_report(captured, calibration, template)
+        self.assertTrue(report["accepted"])
+        self.assertLess(report["max_point_error_cm"], 1e-8)
+        self.assertLess(report["max_pelvis_error_cm"], 1e-8)
+
+    def test_sparse_anchors_span_a_long_interval_without_a_120_frame_cap(self):
+        calibration, template = fixture()
+        captured = snapshot(calibration, frames=[40, 220, 400])
+        converted = keyposes.convert(captured, calibration, template)
+        self.assertEqual(converted["num_frames"], 361)
+        self.assertEqual(converted["frame_indices"], [0, 180, 360])
+        self.assertEqual(converted["source_frames"], [40, 220, 400])
+
     def test_neutral_pose_roundtrip_does_not_change_native_points(self):
         calibration, template = fixture()
         captured = snapshot(calibration)

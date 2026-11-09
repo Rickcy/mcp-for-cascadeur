@@ -22,6 +22,21 @@ MODEL_NAME = "Kimodo-SOMA-RP-v1.2"
 V12_REVISION = "0e3c89024d896064b6851201373f7834784a386b"
 V12_WEIGHTS_SHA256 = "fdcef624140a12c0a4840192ce0b75cafb4e73228a893da3864b4a990d3e919e"
 MAX_CONSTRAINT_BYTES = 64 * 1024 * 1024
+INFERENCE_SEGMENT_FRAMES = 240
+
+
+def generation_segments(num_frames):
+    """Bound attention memory, preserving the exact requested total duration.
+
+    Long clips use Kimodo's native multiprompt continuation, including its body
+    history, heading and root translation. Balanced segments avoid a tiny tail.
+    This is an inference window, not a limit on an animation's duration.
+    """
+    if type(num_frames) is not int or num_frames < 2:
+        raise ValueError("num_frames must be an integer of at least 2")
+    count = (num_frames + INFERENCE_SEGMENT_FRAMES - 1) // INFERENCE_SEGMENT_FRAMES
+    length, extra = divmod(num_frames, count)
+    return [length + (index < extra) for index in range(count)]
 
 
 def configured_model_name(dataset="RP"):
@@ -151,8 +166,8 @@ def validate_generation_request(request, exchange_root=None):
         "constraint_weight": 2.0,
     }
     payload.update({key: request[key] for key in payload if key in request})
+    generation_segments(payload["num_frames"])
     for name, minimum, maximum in (
-        ("num_frames", 2, 1800),
         ("num_samples", 1, 4),
         ("diffusion_steps", 1, 200),
         ("sample_index", 0, 3),
@@ -422,6 +437,8 @@ def write_motion_manifest(payload, motion, model_name, encoder):
         "candidate_index": payload.get("candidate_index", 0),
         "candidate_count": payload.get("candidate_count", 1),
         "diffusion_steps": payload["diffusion_steps"],
+        "generation_segments": generation_segments(payload["num_frames"]),
+        "continuation": "native body-history constraints with root/heading continuity",
         "guidance": {
             "enabled": payload["cfg_enabled"],
             "text_weight": payload["text_weight"],

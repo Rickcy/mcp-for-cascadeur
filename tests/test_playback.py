@@ -128,3 +128,23 @@ def test_shutdown_releases_native_wrappers_without_toggling_playback(observed):
     timer.stop.assert_called_once()
     timer.deleteLater.assert_called_once()
     action.assert_not_called()
+
+
+def test_long_clip_keeps_last_frame_evidence_with_a_bounded_log(observed):
+    session, frame, action, _ = observed
+    session.last, session.timeout = 900, 40
+    playback._observe(session, now=100.31)
+    for index in range(1, 901):
+        frame["value"] = index
+        playback._observe(session, now=100.31 + index / 30)
+    playback._observe(session, now=131)
+    result = playback.playback_status()
+    assert result["full_range_observed"] and result["stop_verified"]
+    assert len(result["samples"]) == 512 and result["samples_dropped"] > 0
+    assert result["samples"][-1]["frame"] == 900
+    assert action.call_count == 2
+
+
+def test_playback_contract_accepts_full_length_timeout():
+    tool = next(tool for tool in playback.TOOLS if tool.name == "playback_start")
+    assert tool.validate({"first": 0, "last": 9000, "timeout": 303})["timeout"] == 303

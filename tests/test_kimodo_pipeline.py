@@ -91,6 +91,24 @@ class GenerationTransportTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
                 pipeline._base_url(endpoint)
 
+    def test_cancelled_generation_is_observed_to_completion_with_measured_progress(self):
+        signal = self.record.parent / "cancel.request"
+        signal.write_text("cancel")
+        observations = [
+            {"ok": True, "job": {"job_id": 3, "done": False, "progress": 17, "status": "Denoising 17/100"}},
+            {"ok": True, "job": {"job_id": 3, "done": True, "progress": 100,
+                                  "artifacts": {"candidates": [{"index": 0}]}}},
+        ]
+        with patch.object(pipeline, "request_json", side_effect=observations) as request:
+            result = pipeline.wait_generation("http://127.0.0.1:9552", 3, poll_interval=0,
+                                              cancel_file=signal, progress_path=self.record.parent / "progress.json",
+                                              total_candidates=1)
+        self.assertTrue(result["done"])
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(all(call.args[1] == "/jobs/3" for call in request.call_args_list))
+        progress = pipeline.read(self.record.parent / "progress.json")
+        self.assertEqual((progress["state"], progress["fraction"], progress["candidates_completed"]), ("cancelling", 1.0, 1))
+
 
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -172,10 +190,13 @@ class PipelineOrchestrationTests(unittest.TestCase):
         for name in ("calibration", "template_motion", "template_scene"):
             Path(getattr(self.args, name)).write_text("fixture")
         self.events = []
+        self.importer = SimpleNamespace(_idle_preflight=self.preflight)
         self.candidates = [{"id": f"candidate-{i + 1:02d}", "index": i, "seed": 42 + i,
                             "output": str(self.root / f"generated-{i}.npz")} for i in range(2)]
         self.workflow = SimpleNamespace(
             transfer=self.transfer,
+            target_settings=lambda *args: {"fps": 30, "unit_length": "cm"},
+            measure=lambda *args, **kwargs: {"fps": 30, "units": "centimeters", "frames": []},
             native=lambda *args: {"fps": 30, "units": "centimeters", "frames": []},
             native_metrics=lambda *args: {"native_contact_speed_m_s": 0.04, "native_contact_coverage_ratio": 0.3},
             render=self.render, capture_constraints=self.capture,
@@ -187,15 +208,23 @@ class PipelineOrchestrationTests(unittest.TestCase):
             _evidence_matches=pipeline.module("motion_review")._evidence_matches,
         )
 
-    def transfer(self, client, motion, calibration, template, output, snapshot):
+    def preflight(self, client):
+        self.events.append("preflight")
+        return {"ready": True, "view_name": "Cascy", "pid": 42}
+
+    def transfer(self, client, motion, calibration, template, output, snapshot, **options):
         self.events.append("transfer")
+        if getattr(self, "observe_native_progress", False):
+            options["progress_callback"]({"completed": 20, "total": self.args.frames, "phase": "points_ready:20"})
+            self.last_native_progress = pipeline.read(Path(self.args.output) / "progress.json")
         self.assertIn("release", self.events)
         self.assertEqual(bool(snapshot), bool(self.args.keyframes))
         return {"scene": str(Path(output) / "result.casc"),
                 "validation": {"geometry": True, "persistence": True, "constraints_required": bool(snapshot)}}
 
-    def render(self, *args):
+    def render(self, *args, **kwargs):
         self.events.append("render")
+        self.last_render_step = kwargs.get("frame_step", 2)
         path = Path(args[3]) / "front.mp4"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"review video")
@@ -213,14 +242,22 @@ class PipelineOrchestrationTests(unittest.TestCase):
 
         def submit(endpoint, payload, path):
             self.events.append("submit")
-            self.assertEqual(bool(payload.get("constraints")), bool(self.args.keyframes))
+            self.last_payload = dict(payload)
+            self.assertEqual(bool(payload.get("constraints")),
+                             bool(self.args.keyframes or getattr(self.args, "constraints", None)))
             return {"job_id": 7}
 
+        def wait(*args, **kwargs):
+            if getattr(self, "on_generation", None):
+                self.on_generation()
+            return {"done": True}
+
         with patch.dict(os.environ, {"GEMINI_API_KEY": "test-secret-only-in-environment"}), \
-                patch.object(pipeline, "module", side_effect=lambda name: self.workflow if name == "workflow" else self.reviewer), \
+                patch.object(pipeline, "module", side_effect=lambda name: {
+                    "workflow": self.workflow, "native_import": self.importer, "motion_review": self.reviewer}[name]), \
                 patch.object(pipeline, "runtime_action", side_effect=lambda *args, **kwargs: self.events.append("start")), \
                 patch.object(pipeline, "submit_generation", side_effect=submit), \
-                patch.object(pipeline, "wait_generation", return_value={"done": True}), \
+                patch.object(pipeline, "wait_generation", side_effect=wait), \
                 patch.object(pipeline, "verify_candidates", return_value=self.candidates), \
                 patch.object(pipeline, "convert_motion", side_effect=convert), \
                 patch.object(pipeline, "source_metrics", return_value=({"source_contact_speed_m_s": 0.03}, [])), \
@@ -240,6 +277,12 @@ class PipelineOrchestrationTests(unittest.TestCase):
         self.assertNotIn("test-secret-only-in-environment", record.read_text())
         with self.assertRaises(FileExistsError):
             self.run_fixture()
+
+    def test_long_operation_timeout_is_accepted_without_affecting_submission_count(self):
+        self.args.timeout = 86400
+        result = self.run_fixture()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(self.events.count("submit"), 1)
 
     def test_keypose_mode_captures_and_returns_every_candidate_with_anchor_snapshot(self):
         self.args.source_scene = str(self.root / "source.casc")
@@ -287,6 +330,170 @@ class PipelineOrchestrationTests(unittest.TestCase):
         self.assertFalse(self.events)
         self.assertFalse(Path(self.args.output).exists())
 
+    def test_native_generation_can_skip_review_without_a_key_and_retain_all_videos(self):
+        self.args.no_review = True
+        self.reviewer.review_settings = lambda **kwargs: {"api_key": None}
+        result = self.run_fixture()
+        self.assertTrue(result["review_skipped"])
+        self.assertEqual((result["state"], result["stage"]), ("completed", "awaiting_review"))
+
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertTrue(all(item.get("media") for item in result["candidates"]))
+        self.assertNotIn("gemini", self.events)
+        self.assertFalse(any(isinstance(event, tuple) for event in self.events))
+
+    def test_long_native_generation_can_save_without_render_or_any_visual_reviewer(self):
+        self.args.frames = 3600
+        self.args.no_render = True
+        self.args.no_review = True
+        self.reviewer.review_identity = lambda **kwargs: self.fail("UI motion must not load a visual reviewer")
+        result = self.run_fixture()
+        self.assertEqual(self.last_payload["num_frames"], 3600)
+        self.assertEqual((result["state"], result["stage"]), ("completed", "completed"))
+        self.assertFalse(result["render_enabled"])
+        self.assertTrue(result["review_skipped"] and result["render_skipped"])
+        self.assertTrue(all(row["media"] == [] for row in result["candidates"]))
+        self.assertEqual(result["selection"]["method"], "native_validation_only")
+        self.assertEqual(self.events[-1], ("activate", result["selected_scene"]))
+        self.assertNotIn("render", self.events)
+        self.assertNotIn("gemini", self.events)
+
+    def test_failed_native_checks_prevent_automatic_activation_without_visual_review(self):
+        self.args.no_render = True
+        transfer = self.workflow.transfer
+        self.workflow.transfer = lambda *args, **options: {**transfer(*args, **options),
+                                                          "validation": {"geometry": False, "persistence": True}}
+        with self.assertRaisesRegex(pipeline.PipelineError, "No native result passed"):
+            self.run_fixture()
+        self.assertFalse(any(isinstance(event, tuple) for event in self.events))
+        record = pipeline.read(Path(self.args.output) / "run.json")
+        self.assertEqual((record["state"], len(record["candidates"])), ("failed", 2))
+
+    def test_current_target_is_calibrated_before_generation_instead_of_using_cascy_inputs(self):
+        target = self.root / "custom-target.casc"
+        target.write_bytes(b"custom target")
+        self.args.target_scene = str(target)
+        self.args.character_id = "target-rig"
+        self.args.rig_mapping = '{"pelvis": "native-pelvis-id"}'
+        self.args.first_frame = 50
+        self.args.no_render = True
+        self.args.calibration = self.args.template_motion = self.args.template_scene = None
+        self.workflow.native = lambda client, operation, payload: (
+            self.events.append((operation, payload)) or {"format": "target-calibration"})
+        result = self.run_fixture()
+        calibration = pipeline.read(result["inputs"]["calibration"]["path"])
+        self.assertEqual(calibration["format"], "target-calibration")
+        self.assertEqual(result["target"]["first_frame"], 50)
+        capture = next(event for event in self.events if isinstance(event, tuple) and event[0] == "calibrate")
+        self.assertEqual(capture[1]["mapping"], {"pelvis": "native-pelvis-id"})
+        self.assertLess(self.events.index(capture), self.events.index("submit"))
+
+    def test_unsupported_target_timebase_is_rejected_before_gpu_or_native_work(self):
+        target = self.root / "custom-target.casc"
+        target.write_bytes(b"custom target")
+        self.args.target_scene, self.args.character_id = str(target), "target-rig"
+        for settings in ({"fps": 60, "unit_length": "cm"}, {"fps": 30, "unit_length": "m"}):
+            self.workflow.target_settings = lambda *args: settings
+            with self.assertRaisesRegex(ValueError, "30 FPS"):
+                self.run_fixture()
+            self.assertFalse(self.events)
+            self.assertFalse(Path(self.args.output).exists())
+
+    def test_verified_native_cursor_reaches_durable_job_progress_without_repeating_transfer(self):
+        self.args.frames, self.args.no_render = 540, True
+        self.observe_native_progress = True
+        self.run_fixture()
+        self.assertEqual(self.last_native_progress["fraction"], 20 / 540)
+        self.assertEqual(self.last_native_progress["message"], "Перенесено 20 из 540 кадров")
+        self.assertEqual(self.events.count("transfer"), 2)
+
+    def test_guidance_alias_and_full_frame_render_options_reach_the_existing_stages(self):
+        self.args.no_cfg = True
+        self.args.text_weight = 3.25
+        self.args.constraint_weight = 0.5
+        self.args.sample_index = 1
+        self.args.render_sample_step = 1
+        self.args.no_activate = True
+        result = self.run_fixture()
+        self.assertEqual({name: self.last_payload[name] for name in
+                          ("cfg_enabled", "text_weight", "constraint_weight", "sample_index")},
+                         {"cfg_enabled": False, "text_weight": 3.25, "constraint_weight": 0.5, "sample_index": 1})
+        self.assertEqual(self.last_render_step, 1)
+        self.assertTrue(result["selected_scene"])
+        self.assertFalse(any(isinstance(event, tuple) for event in self.events))
+
+    def test_cancel_before_start_does_not_touch_gpu_or_native_state(self):
+        signal = self.root / "kimodo/cancel.request"
+        signal.parent.mkdir()
+        signal.write_text("cancel")
+        self.args.cancel_file = str(signal)
+        result = self.run_fixture()
+        self.assertEqual(result["state"], "cancelled")
+        self.assertEqual(self.events, [])
+        self.assertEqual(pipeline.read(Path(self.args.output) / "progress.json")["state"], "cancelled")
+
+    def test_cancel_during_generation_retains_conversion_and_releases_gpu_before_native(self):
+        signal = self.root / "kimodo/cancel.request"
+        self.args.cancel_file = str(signal)
+        self.on_generation = lambda: signal.write_text("cancel")
+        result = self.run_fixture()
+        self.assertEqual(result["state"], "cancelled")
+        self.assertEqual(len(result["generated_candidates"]), 2)
+        self.assertEqual(self.events, ["preflight", "start", "submit", "convert", "convert", "release"])
+        self.assertTrue(all(Path(item["retarget_motion"]).is_file() for item in result["generated_candidates"]))
+
+    def test_raw_long_generation_needs_no_native_inputs_key_or_conversion(self):
+        self.args.generate_only = True
+        self.args.frames = 1800
+        for name in ("calibration", "template_motion", "template_scene"):
+            setattr(self.args, name, None)
+        self.reviewer.review_identity = lambda **kwargs: self.fail("Raw generation must not load visual review settings")
+        result = self.run_fixture()
+        self.assertEqual((result["state"], result["stage"], result["mode"]), ("completed", "generated", "generated_only"))
+        self.assertEqual(self.last_payload["num_frames"], 1800)
+        self.assertEqual(result["candidates"], self.candidates)
+        self.assertTrue(all("validation" not in item and "media" not in item for item in result["candidates"]))
+        self.assertEqual(self.events, ["start", "submit", "release"])
+
+    def test_raw_constraints_are_hash_bound_and_native_route_rejects_prepared_files(self):
+        source = self.root / "kimodo/prepared.npz"
+        source.parent.mkdir()
+        source.write_bytes(b"prepared constraint data; backend validates array shape")
+        self.args.constraints = str(source)
+        with self.assertRaisesRegex(ValueError, "Prepared"):
+            self.run_fixture()
+        self.assertFalse(Path(self.args.output).exists())
+        self.args.generate_only = True
+        result = self.run_fixture()
+        self.assertEqual(self.last_payload["constraints"], "prepared.npz")
+        self.assertEqual(self.last_payload["constraints_sha256"], pipeline._sha(source))
+        self.assertEqual(result["prepared_constraints"]["sha256"], pipeline._sha(source))
+
+    def test_invalid_guidance_alias_and_render_options_fail_before_any_work(self):
+        for name, value in (("text_weight", float("nan")), ("constraint_weight", 10.1),
+                            ("sample_index", 2), ("render_sample_step", 0)):
+            with self.subTest(name=name):
+                setattr(self.args, name, value)
+                try:
+                    with self.assertRaises(ValueError):
+                        self.run_fixture()
+                    self.assertFalse(Path(self.args.output).exists())
+                    self.assertEqual(self.events, [])
+                finally:
+                    delattr(self.args, name)
+
+    def test_native_readiness_fails_before_starting_the_generator(self):
+        def disconnected(client):
+            self.events.append("preflight")
+            raise pipeline.PipelineError("Cascadeur is disconnected")
+
+        self.importer._idle_preflight = disconnected
+        with self.assertRaisesRegex(pipeline.PipelineError, "Cascadeur is disconnected"):
+            self.run_fixture()
+        self.assertEqual(self.events, ["preflight"])
+        record = pipeline.read(Path(self.args.output) / "run.json")
+        self.assertEqual((record["state"], record["stage"]), ("failed", "checking_cascadeur"))
+
 
 class PipelineResumeTests(unittest.TestCase):
     def setUp(self):
@@ -321,6 +528,7 @@ class PipelineResumeTests(unittest.TestCase):
         pipeline.write(self.output / "generation.json", {"state": "finished", "last_observation": self.job})
         self.transfers, self.renders, self.reviews, self.activations, self.review_options = [], [], [], [], []
         self.workflow = SimpleNamespace(transfer=self.transfer, render=self.render, native=self.native,
+                                        measure=lambda *args, **kwargs: self.native(args[0], "measure", {}),
                                         native_metrics=lambda *args: {"native_contact_speed_m_s": 0.03,
                                                                      "native_contact_coverage_ratio": 0.3})
         original_reviewer = pipeline.module("motion_review")
@@ -329,8 +537,8 @@ class PipelineResumeTests(unittest.TestCase):
                                         review_settings=review_settings, review_identity=review_identity,
                                         _evidence_matches=original_reviewer._evidence_matches)
 
-    def complete_native(self, candidate):
-        directory = self.output / candidate["id"] / "native"
+    def complete_native(self, candidate, directory=None):
+        directory = Path(directory) if directory is not None else self.output / candidate["id"] / "native"
         session = directory / "points-test"
         session.mkdir(parents=True)
         before = session / "before.casc"
@@ -349,12 +557,12 @@ class PipelineResumeTests(unittest.TestCase):
         pipeline.write(directory / "transfer.json", result)
         return result
 
-    def transfer(self, client, motion, calibration, template, output, snapshot):
+    def transfer(self, client, motion, calibration, template, output, snapshot, **options):
         self.transfers.append(str(output))
         candidate = next(item for item in self.candidates if item["retarget_motion"] == motion)
-        return self.complete_native(candidate)
+        return self.complete_native(candidate, output)
 
-    def render(self, client, scene, measurement, output):
+    def render(self, client, scene, measurement, output, **kwargs):
         self.renders.append(str(output))
         Path(output).mkdir(parents=True)
         media = []
@@ -379,7 +587,7 @@ class PipelineResumeTests(unittest.TestCase):
     def run_resume(self):
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(pipeline, "module", side_effect=lambda name: {
-                "workflow": self.workflow, "motion_review": self.reviewer
+                "workflow": self.workflow, "motion_review": self.reviewer, **getattr(self, "extra_modules", {})
             }[name]))
             forbidden = [stack.enter_context(patch.object(pipeline, name, side_effect=AssertionError(name)))
                          for name in ("runtime_action", "submit_generation", "wait_generation", "convert_motion",
@@ -406,6 +614,50 @@ class PipelineResumeTests(unittest.TestCase):
         self.assertEqual(self.activations[-1], result["selected_scene"])
         self.assertFalse((self.output / ".resume.lock").exists())
 
+    def test_cancelled_native_run_can_resume_verified_artifacts_without_generation(self):
+        self.record["state"] = "cancelled"
+        pipeline.write(self.output / "run.json", self.record)
+        result = self.run_resume()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(len(self.transfers), 2)
+        self.assertEqual(pipeline.read(self.output / "progress.json")["state"], "completed")
+
+    def test_resume_can_retain_native_videos_without_calling_the_visual_api(self):
+        self.args.no_review = True
+        result = self.run_resume()
+        self.assertEqual((result["state"], result["stage"]), ("completed", "awaiting_review"))
+        self.assertFalse(self.reviews)
+        self.assertTrue(all(item.get("media") for item in result["candidates"]))
+
+    def test_resume_native_ui_run_keeps_render_disabled_and_does_not_request_review(self):
+        self.record["render_enabled"] = False
+        pipeline.write(self.output / "run.json", self.record)
+        self.args.no_render = None
+        result = self.run_resume()
+        self.assertEqual((result["state"], result["stage"]), ("completed", "completed"))
+        self.assertTrue(result["render_skipped"])
+        self.assertFalse(self.renders or self.reviews)
+        self.assertTrue(result["selected_scene"])
+
+    def test_resume_preserves_the_original_render_sampling_when_no_override_is_supplied(self):
+        self.record["render_sample_step"] = 1
+        self.args.render_sample_step = None
+        pipeline.write(self.output / "run.json", self.record)
+        renderer = self.workflow.render = unittest.mock.Mock(wraps=self.render)
+        result = self.run_resume()
+        self.assertEqual(result["render_sample_step"], 1)
+        self.assertTrue(renderer.call_args_list)
+        self.assertTrue(all(call.kwargs["frame_step"] == 1 for call in renderer.call_args_list))
+
+    def test_raw_outputs_cannot_be_misrepresented_as_resumable_native_review(self):
+        self.record.update(state="completed", mode="generated_only", stage="generated")
+        pipeline.write(self.output / "run.json", self.record)
+        with self.assertRaisesRegex(pipeline.PipelineError, "no native scenes"):
+            self.run_resume()
+        with self.assertRaisesRegex(pipeline.PipelineError, "no native scenes"):
+            pipeline.review_pipeline(self.args, client=self.client)
+        self.assertFalse(self.transfers or self.renders or self.reviews or self.activations)
+
     def test_resume_reuses_pinned_media_without_duplicate_render(self):
         result = self.complete_native(self.candidates[0])
         media = self.render(None, result["scene"], {}, self.output / "candidate-01/review")
@@ -426,6 +678,88 @@ class PipelineResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(pipeline.PipelineError, "incomplete"):
             self.run_resume()
         self.assertFalse(self.transfers or self.renders or self.activations or self.reviews)
+
+    def failed_native(self, candidate, *, transport_status="unknown", returned_error=True):
+        result = self.complete_native(candidate)
+        receipt_path = Path(result["receipt"])
+        receipt = pipeline.read(receipt_path)
+        receipt.update(schema="kimodo-point-session-v1", phase="needs_review:points_ready:20", native_pid=42,
+                       error="UnsupportedCurveState: blocked", next_frame=0)
+        pipeline.write(receipt_path, receipt)
+        transfer = receipt_path.parent.parent / "transfer.json"
+        pipeline.write(transfer, {"receipt_path": str(receipt_path), "phase": "points_prepared"})
+        marker = receipt_path.parent / ".native-transport.json"
+        pipeline.write(marker, {"status": transport_status, "stage": "point_apply", "native_pid": 42,
+                                "details": {"native_error": {"type": "UnsupportedCurveState", "message": "blocked",
+                                                             "traceback": "known synchronous callback error"}}
+                                           if returned_error else None})
+        working = receipt_path.parent / "working.casc"
+        working.write_bytes(b"uncertain old working scene retained untouched")
+        self.native_inspections = []
+
+        def inspect(client, receipt, **options):
+            self.native_inspections.append(options)
+            return {"phase": "needs_review:points_ready:20", "lock": None,
+                    "native": {"ok": True, "state": {"ready": True, "pid": 42},
+                               "result": {"phase": "needs_review:points_ready:20", "before_unchanged": True}}}
+
+        self.inspector = SimpleNamespace(status=inspect, _idle_preflight=lambda client, pid: {"ready": True, "pid": pid})
+        return receipt_path, marker, working
+
+    def test_explicit_resume_inspects_failed_copy_and_starts_a_new_owned_attempt_without_replay(self):
+        receipt, marker, working = self.failed_native(self.candidates[0])
+        original = {path: path.read_bytes() for path in (receipt, marker, working)}
+        self.args.no_render = True
+        self.extra_modules = {"native_import": self.inspector}
+        result = self.run_resume()
+        self.assertEqual(result["state"], "completed")
+        self.assertTrue(self.transfers[0].endswith("native-2"))
+        for path, content in original.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(self.native_inspections[0], {"native": True, "acknowledge_completed": False, "expected_pid": 42})
+        pointer = pipeline.read(self.output / "candidate-01/native-attempt.json")
+        self.assertEqual(pointer["directory"], "native-2")
+        self.assertEqual(result["retained_native_attempts"]["candidate-01"][0]["receipt"], str(receipt))
+        result["state"] = "failed"
+        pipeline.write(self.output / "run.json", result)
+        self.transfers.clear()
+        resumed = self.run_resume()
+        self.assertEqual(resumed["state"], "completed")
+        self.assertFalse(self.transfers)
+        self.assertEqual(len(resumed["retained_native_attempts"]["candidate-01"]), 1)
+        self.assertEqual(marker.read_bytes(), original[marker])
+
+    def test_unknown_transport_without_a_returned_callback_error_does_not_create_a_new_attempt(self):
+        self.failed_native(self.candidates[0], returned_error=False)
+        with self.assertRaisesRegex(pipeline.PipelineError, "no returned native error"):
+            self.run_resume()
+        self.assertFalse(self.transfers or self.activations)
+        self.assertFalse((self.output / "candidate-01/native-attempt.json").exists())
+
+    def test_nonidle_native_inspection_prevents_abandonment_and_new_copy(self):
+        self.failed_native(self.candidates[0])
+        self.inspector._idle_preflight = lambda *args: {"ready": False, "pid": 42}
+        self.extra_modules = {"native_import": self.inspector}
+        with self.assertRaisesRegex(pipeline.PipelineError, "terminal idle"):
+            self.run_resume()
+        self.assertFalse(self.transfers or self.activations)
+        self.assertFalse((self.output / "candidate-01/native-attempt.json").exists())
+
+    def test_submitted_or_locked_attempt_cannot_be_abandoned(self):
+        receipt, marker, _ = self.failed_native(self.candidates[0], transport_status="submitted")
+        with self.assertRaisesRegex(pipeline.PipelineError, "no returned native error"):
+            self.run_resume()
+        (receipt.parent / ".native-import.lock").write_text("owned lock")
+        with self.assertRaisesRegex(pipeline.PipelineError, "lock remains"):
+            self.run_resume()
+        self.assertFalse(self.transfers or self.activations)
+
+    def test_changed_immutable_failed_copy_source_cannot_start_a_new_attempt(self):
+        receipt, _, _ = self.failed_native(self.candidates[0])
+        (receipt.parent / "before.casc").write_bytes(b"changed source")
+        with self.assertRaisesRegex(pipeline.PipelineError, "pinned inputs"):
+            self.run_resume()
+        self.assertFalse(self.transfers or self.activations)
 
     def test_changed_saved_scene_is_not_rewritten(self):
         result = self.complete_native(self.candidates[0])

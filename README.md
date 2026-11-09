@@ -5,6 +5,10 @@ native scenes and rigs, author body and finger animation, preserve curves,
 retime keys, run native animation tools and verify saved results. Optional
 Kimodo generation and provider-neutral visual review extend the native workflow.
 
+Smart Motion and the `kimodo_*` MCP tools described here are part of the current
+checkout. The published `release/0.1.0` tag predates these additions. Install this
+checkout for the panel; the tag remains the reproducible earlier release.
+
 ## Install
 
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
@@ -14,7 +18,8 @@ with the validated Cascy rig. Generic discovery can inspect other installations;
 their native editing behavior must be verified separately.
 
 ```powershell
-uvx --from git+https://github.com/Rickcy/mcp-for-cascadeur@release/0.1.0 mcp-for-cascadeur setup --install-startup
+uv tool install --force ".[animation]"
+mcp-for-cascadeur setup --install-startup --local-tool --allow-python
 ```
 
 Setup discovers Cascadeur, installs a stable host runtime outside the uv cache,
@@ -23,12 +28,16 @@ backed up. Restart Cascadeur, open a scene, and reconnect the MCP client. The
 welcome screen alone does not provide scene-idle execution events.
 
 ```powershell
-uvx --from git+https://github.com/Rickcy/mcp-for-cascadeur@release/0.1.0 mcp-for-cascadeur doctor
+mcp-for-cascadeur doctor
 ```
 
-The release is installed from its Git tag; these commands do not require a PyPI
-publication. For checkout/wheel installation, client JSON and custom paths, see
-[installation](docs/installation.md).
+Setup also installs **Scripts > MCP > Smart Motion**. Its native panel uses
+Cascadeur's bundled Qt; generation runs in an external worker. It creates one
+animation for the selected character and timeline range, without video rendering
+or VLM requests. Prepared Kimodo sources and model assets are required. Known
+UE5/UEFN humanoid mappings are automatic; custom rigs can bind their body roles
+in the panel. See [Smart Motion](docs/smart-motion.md) and
+[installation](docs/installation.md); no PyPI publication is required.
 
 ## What is available
 
@@ -41,15 +50,17 @@ publication. For checkout/wheel installation, client JSON and custom paths, see
 | Native animation tools | Video Mocap, pose-based Motion Generation, Animation Unbaking and AutoPhysics with progress and recovery |
 | Recovery | Whole-model checkpoints, durable poses, request receipts, verified rollback and persistent recovery fences |
 | Playback and delivery | Observed native playback, camera/viewport capture, native save/reopen and licensed verified FBX export |
-| Optional Kimodo pipeline | Text or native body key poses → Kimodo-SOMA-RP-v1.2 → editable Cascy; retain and compare up to four candidates |
+| Optional Kimodo pipeline | Text or native body key poses → Kimodo-SOMA-RP-v1.2 → the selected mapped humanoid; API clients may retain up to four candidates |
+| Smart Motion panel | Prompt, selected character/range, native key poses, one result, progress, cooperative cancellation and resume; no VLM or video rendering |
 | Visual review | Gemini or a compatible local Qwen3-VL service; common report schema, multi-view motion evidence and explicit uncertainty |
 
-The packaged MCP server supplies native structured tools plus
-`visual_review_status` and `animation_review`. Visual review runs in the external
-MCP process and can be used while Cascadeur is disconnected. The optional Kimodo
-pipeline is a separate checkout-based CLI that uses the installed native runner;
-it is not a `kimodo_generate` MCP tool. Full Python access is opt-in through
-`setup --allow-python` and has Cascadeur's application privileges.
+The packaged MCP server supplies native structured tools, `animation_review` and
+the `kimodo_*` job tools. Smart Motion, MCP and the CLI use the same durable
+worker service and prepared checkout pipeline. `kimodo_generate` returns a job
+ID; `kimodo_job_status` observes it without holding the MCP connection open.
+Visual review and raw generation can run while Cascadeur is disconnected.
+Native Kimodo transfer requires `setup --allow-python`; this explicit opt-in
+has Cascadeur's application privileges.
 
 ## The animation workflow
 
@@ -60,8 +71,9 @@ it is not a `kimodo_generate` MCP tool. Full Python access is opt-in through
    poses and timing from motion events; handle finger articulation separately.
 4. Generate or apply bounded edits. Read actual solved results, protected channels,
    geometry and contact diagnostics. Poll native jobs to verified completion.
-5. Render the resulting motion from several views and send the comparison to the
-   configured visual reviewer. Correct only a diagnosed problem, then recheck it.
+5. For an assistant-driven visual review, render the resulting motion from several
+   views and send the comparison to the configured reviewer. Interactive panel
+   generation skips this stage. Correct only a diagnosed problem, then recheck it.
 6. Save, reopen and verify the result; observe playback and verify any licensed
    export in the receiving application. Retain useful outputs and recovery records.
 
@@ -119,17 +131,28 @@ checkpoint is **Kimodo-SOMA-RP-v1.2**, with a real 4-bit LLM2Vec encoder. The
 Indie-compatible route uses this project's Point retarget instead of Pro-only
 native Retargeting Copy/Paste.
 
-The checked transfer covers **2–120 frames at 30 FPS**, body motion and root
-placement. Finger articulation and seamless loops need separate work. On a 12 GB
-GPU, candidates run sequentially and the generator is released before native
-review/local VLM inference. See [Kimodo setup and commands](integrations/kimodo/README.md).
+Open **Scripts > MCP > Smart Motion**, enter a prompt, choose the target character
+and take the selected timeline range. Enable body anchors to use native keys or
+add the current pose. The panel exposes generation, saved results and runtime
+controls. The same pipeline is available through `kimodo_generate` and
+`mcp-for-cascadeur motion generate --request '<request.json>'`; parameters and
+job handling are documented in the [workflow](docs/workflow.md#smart-motion-panel-mcp-and-cli).
+
+Generation and transfer have no fixed total frame-count ceiling. Long inference
+uses native continuation in chunks of up to 240 frames; the chosen range determines
+the output length. Transfer writes bounded batches and verifies the saved result.
+The model produces 30 FPS body/root motion. Finger articulation and seamless loops
+need separate work. Real memory, disk, runtime and native index capacity still
+apply. Raw NPZ/FBX output does not establish native transfer correctness. See
+[Kimodo setup and commands](integrations/kimodo/README.md).
 
 ## Limits and verification
 
-Native body edits have a 121-stored-frame contract including a read-only terminal
-guard. Character retiming accepts 2–8 synchronized keys. Native animation jobs
-have a separate 512-stored-frame limit including their guard. A job's larger
-budget does not expand the character-edit contract.
+Character retiming accepts 2–8 synchronized keys. General checked edits require
+a complete recovery checkpoint within the byte, node and sample budgets; the
+terminal solver guard remains read-only. Smart Motion writes only its isolated
+owned result through bounded Point batches, retaining the immutable source.
+Other native animation tools keep their separately documented acceptance scope.
 
 Native actions report dispatch. Structured jobs verify operation-specific
 completion. After an uncertain write, inspect its receipt rather than retrying.
@@ -143,7 +166,7 @@ See [capability contracts](docs/capabilities.md), [workflow](docs/workflow.md),
 
 Install the intended release source and repeat setup, then restart Cascadeur and
 the MCP client so imported native modules reload. `mcp-for-cascadeur uninstall`
-removes the recorded startup hook and client entry, preserving scenes, models
+removes the recorded startup hook, Smart Motion menu and client entry, preserving scenes, models
 and user settings. Remove a persistent uv installation separately with
 `uv tool uninstall mcp-for-cascadeur`.
 

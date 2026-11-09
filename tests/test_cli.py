@@ -24,6 +24,7 @@ def test_setup_uses_stable_runtime_and_configures_requested_source(tmp_path, mon
     calls = {}
     monkeypatch.setattr(cli.installation, "detect_cascadeur_home", lambda _: home)
     monkeypatch.setattr(cli.installation, "install_runtime", lambda config: tmp_path / "start_bridge.py")
+    monkeypatch.setattr(cli.installation, "install_panel_menu", lambda config, bridge: {"installed": True})
     monkeypatch.setattr(cli.installation, "install_startup", lambda config, bridge: {"installed": True})
     monkeypatch.setattr(
         cli.installation, "configure_codex", lambda **kwargs: calls.update(kwargs) or {"changed": True}
@@ -128,6 +129,7 @@ def test_setup_source_precedence_uses_current_remote_install_by_default(
     monkeypatch.setenv("MCP_FOR_CASCADEUR_HOME", str(tmp_path / "settings"))
     monkeypatch.setattr(cli.installation, "detect_cascadeur_home", lambda _: tmp_path / "Cascadeur")
     monkeypatch.setattr(cli.installation, "install_runtime", lambda _: tmp_path / "start_bridge.py")
+    monkeypatch.setattr(cli.installation, "install_panel_menu", lambda config, bridge: {"installed": True})
     monkeypatch.setattr(
         cli.installation, "default_package_source", lambda: "git+https://example.test/repo@pinned"
     )

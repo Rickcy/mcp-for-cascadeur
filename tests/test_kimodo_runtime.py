@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -78,6 +79,30 @@ class GenerationRequestTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.request(**changes)
+
+    def test_long_duration_has_no_total_cap_and_uses_bounded_inference_segments(self):
+        for count in (2, 120, 240, 241, 1801, 10001):
+            with self.subTest(frames=count):
+                request = self.request(num_frames=count)
+                segments = runtime.generation_segments(request["num_frames"])
+                self.assertEqual(sum(segments), count)
+                self.assertTrue(all(2 <= length <= 240 for length in segments))
+                self.assertLessEqual(max(segments) - min(segments), 1)
+
+    @unittest.skipUnless(sys.platform == "win32", "The PowerShell launcher targets Windows")
+    def test_windows_launcher_binds_long_ranges_without_running_its_body(self):
+        script = str(INTEGRATION / "kimodo.ps1").replace("'", "''")
+        parse = ("$taskAst=[System.Management.Automation.Language.Parser]::ParseFile('" + script
+                 + "',[ref]$null,[ref]$null); $taskBlock=[scriptblock]::Create("
+                   "$taskAst.ParamBlock.Extent.Text + [Environment]::NewLine + '$Frames'); ")
+        for count in (1801, 10001):
+            result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                     parse + f"& $taskBlock -Frames {count} -TimeoutSeconds 86400"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(count))
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                 parse + "& $taskBlock -Frames 1"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_candidates_have_distinct_paths_and_seeds_including_uint32_wrap(self):
         request = self.request(num_samples=3, sample_index=1, seed=2**32 - 1)
@@ -469,8 +494,12 @@ class RequestHandler:
 
                 def __call__(self, prompt, frames, **options):
                     events.append(("generate", options["num_samples"]))
-                    list(options["progress_bar"](range(2)))
-                    return {"local_rot_mats": [[], []], "root_positions": [[0, 1, 0], [0, 1, 1]]}
+                    lengths = frames if isinstance(frames, list) else [frames]
+                    self.asserted = (prompt, lengths, options)
+                    for _ in lengths:
+                        list(options["progress_bar"](range(2)))
+                    return {"local_rot_mats": [[] for _ in range(sum(lengths))],
+                            "root_positions": [[0, 1, i] for i in range(sum(lengths))]}
 
             def save_npz(path, motion):
                 events.append(("npz", Path(path).name))
@@ -497,6 +526,7 @@ class RequestHandler:
                 "resolve_fbx_skeleton": lambda *args: object(),
                 "write_motion_manifest": runtime.write_motion_manifest,
                 "generate_candidate_set": runtime.generate_candidate_set,
+                "generation_segments": runtime.generation_segments,
             }
             exec(compile(ast.Module(body=[function], type_ignores=[]), "backend fixture", "exec"), scope)
             job = SimpleNamespace(
@@ -516,6 +546,66 @@ class RequestHandler:
             self.assertEqual([event[0] for event in events], ["seed", "generate", "npz", "fbx"] * 3 + ["done", "finished"])
             self.assertEqual(progress, [(step, 6) for step in range(1, 7)])
             self.assertEqual(len(job.artifacts["candidates"]), 3)
+            events.clear()
+            errors.clear()
+            progress.clear()
+            payload = runtime.validate_generation_request({"prompt": "walk", "num_frames": 481,
+                                                           "num_samples": 1, "diffusion_steps": 2}, folder)
+            job.payload = payload
+            model = Model()
+            state.get_or_load_model = lambda *args: (model, "Kimodo-SOMA-RP-v1.2")
+            with patch.object(runtime, "checkpoint_details", return_value={"name": "Kimodo-SOMA-RP-v1.2"}):
+                scope["run_generation_job"](state, job)
+            self.assertEqual(errors, [])
+            prompts, lengths, options = model.asserted
+            self.assertEqual((prompts, lengths), (["walk"] * 3, [161, 160, 160]))
+            self.assertTrue(options["multi_prompt"])
+            self.assertTrue(options["post_processing"])
+            self.assertEqual(progress, [(step, 6) for step in range(1, 7)])
+            payload = runtime.validate_generation_request({"prompt": "anchored walk", "num_frames": 481}, folder)
+            constraint_path = Path(folder) / "constraints.npz"
+            constraint_path.write_bytes(b"hash-bound constraint fixture")
+            payload.update(constraints=str(constraint_path), constraints_sha256=hashlib.sha256(
+                constraint_path.read_bytes()).hexdigest())
+            job.payload = payload
+            supplied_constraint = object()
+            loads = []
+
+            class Tensor:
+                def long(self):
+                    return self
+
+                def to(self, *args, **options):
+                    return self
+
+            scope["load_constraints"] = lambda path, **options: (
+                loads.append((path, options)) or (SimpleNamespace(tolist=lambda: [0, 480]), [], []))
+            scope["adapt_constraints_to_model_skeleton"] = lambda skeleton, positions, rotations: (positions, rotations)
+            scope["torch"].from_numpy = lambda value: Tensor()
+            scope["torch"].float32 = "float32"
+            scope["_kimodo_api"] = lambda: {"seed_everything": lambda seed: None,
+                                           "save_kimodo_npz": save_npz, "save_motion_fbx": save_fbx,
+                                           "FullBodyConstraintSet": lambda *args: supplied_constraint}
+            with patch.object(runtime, "checkpoint_details", return_value={"name": "Kimodo-SOMA-RP-v1.2"}):
+                scope["run_generation_job"](state, job)
+            self.assertEqual(errors, [])
+            self.assertEqual(model.asserted[2]["constraint_lst"], [supplied_constraint])
+            self.assertEqual(loads[0][1], {"expected_sha256": payload["constraints_sha256"], "num_frames": 481})
+
+    def test_native_multiprompt_continuation_keeps_constraints_and_reports_each_window(self):
+        source = '''class Kimodo:
+    def _multiprompt(self, cfg_type, progress_bar):
+        constraint_lst_base = [constraint.crop_move(10, 20) for constraint in constraint_lst]
+        motion = self._generate(
+                cfg_type=cfg_type,
+            )
+        return motion
+'''
+        patched = patcher.patch_motion_model(source)
+        self.assertIn("constraint.crop_move(10, 20)", patched)
+        self.assertIn("progress_bar=progress_bar", patched)
+        with self.assertRaisesRegex(RuntimeError, "expected one"):
+            patcher.patch_motion_model(source.replace("cfg_type=cfg_type", "changed=True"))
 
     def test_registry_advertises_only_v12_and_resolves_its_base_alias(self):
         source = r"""import re

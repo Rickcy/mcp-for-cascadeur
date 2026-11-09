@@ -716,7 +716,7 @@ def _verify_preserved_pose_curves(scene, rig, before, after, edited_frames, trac
     }
 
 
-def _point_plan(scene, rig, entries, sampled_motion):
+def _point_plan(scene, rig, entries, sampled_motion, *, coordinate_limit=10000):
     limit = 64 if sampled_motion else 8
     if type(entries) is not list or not 1 <= len(entries) <= limit:
         raise ValueError("Provide 1-" + str(limit) + " existing character poses.")
@@ -736,7 +736,7 @@ def _point_plan(scene, rig, entries, sampled_motion):
             if type(patch) is not dict or set(patch) != {"position"}:
                 raise ValueError("Character Point patches require exactly a world-space position.")
             target = finite_vector(patch["position"], 3)
-            if any(abs(component) > 10000 for component in target):
+            if coordinate_limit is not None and any(abs(component) > coordinate_limit for component in target):
                 raise ValueError("Character Point targets exceed 10000 scene units.")
             targets[key] = target
         if sampled_motion:

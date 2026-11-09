@@ -6,6 +6,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -39,16 +40,19 @@ class View:
     def domain_scene(self):
         return self.domain
 
+    def save(self, path):
+        if Path(path) != self.path:
+            raise AssertionError("A close preparation must retain the owned source path")
+
 
 class KimodoReopenStageTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="kimodo-reopen-test-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
-        self.root.joinpath("before.casc").write_bytes(b"untouched recovery copy")
-        self.root.joinpath("working.casc").write_bytes(b"working copy")
-        self.root.joinpath("source.casc").write_bytes(b"source copy")
-        self.root.joinpath("result.casc").write_bytes(b"saved generated scene")
+        for name in ("before", "working", "source", "result"):
+            self.save_scene(name)
+        self.before_bytes = self.root.joinpath("before.casc").read_bytes()
         self.result = View(self.root / "result.casc")
         self.source = View(self.root / "source.casc")
         self.user = View(self.root.parent / "user-project.casc")
@@ -60,10 +64,10 @@ class KimodoReopenStageTests(unittest.TestCase):
             scenes=lambda: self.views,
             current_scene=lambda: self.current,
             set_current_scene=self.activate,
-            remove_application_scene=self.remove,
+            remove_application_scene=lambda view: self.fail("Use the native data-source close path"),
         )
-        datasource = SimpleNamespace(load_scene=self.open)
-        self.app = SimpleNamespace(get_data_source_manager=lambda: datasource)
+        self.datasource = SimpleNamespace(load_scene=self.open, close_scene=self.remove)
+        self.app = SimpleNamespace(get_data_source_manager=lambda: self.datasource)
         self.snapshot = {
             "fingerprint": "native-semantic-rig",
             "positions": {"pelvis_MainPoint": [[0, 100, 0], [0, 100, 20]]},
@@ -73,10 +77,17 @@ class KimodoReopenStageTests(unittest.TestCase):
         patch.object(
             bridge, "_snapshot", side_effect=lambda view, count: copy.deepcopy(self.snapshot)
         ).start()
+        patch.object(
+            points, "snapshot", side_effect=lambda view, count, record: copy.deepcopy(self.snapshot)
+        ).start()
         patch.object(points, "_bridge", return_value=bridge).start()
 
     def activate(self, view):
         self.current = view
+
+    def save_scene(self, name, linked=None):
+        with zipfile.ZipFile(self.root / (name + ".casc"), "w") as archive:
+            archive.writestr("tool/linked_scenes.json", json.dumps({"Data": linked or {}}))
 
     def remove(self, view):
         self.assertIsNot(view, self.current)
@@ -99,6 +110,7 @@ class KimodoReopenStageTests(unittest.TestCase):
             "active_target": "result",
             "num_frames": 2,
             "generation": {"num_frames": 2},
+            "point_bindings": {},
             "before_sha256": hashlib.sha256(self.root.joinpath("before.casc").read_bytes()).hexdigest(),
             "result_sha256": hashlib.sha256(self.root.joinpath("result.casc").read_bytes()).hexdigest(),
             "expected": self.snapshot,
@@ -123,6 +135,58 @@ class KimodoReopenStageTests(unittest.TestCase):
             bridge._close_inactive_view(self.source, None)
         self.assertEqual(self.removed, [])
 
+    def test_saved_inactive_scene_uses_datasource_close_and_retains_other_tabs(self):
+        bridge._close_inactive_view(self.source, self.callback)
+        self.assertEqual(self.removed, [self.source])
+        self.assertEqual(self.views, [self.user, self.result])
+        self.assertIs(self.current, self.result)
+
+    def test_linked_scene_expansion_is_rejected_before_native_close(self):
+        self.save_scene("source", {"scene": "result.casc"})
+        with self.assertRaisesRegex(RuntimeError, "linked scenes"):
+            bridge._close_inactive_view(self.source, self.callback)
+        self.assertEqual(self.removed, [])
+
+    def test_missing_or_malformed_link_information_never_dispatches_close(self):
+        for content in (None, b"not JSON", b'{"Data": []}'):
+            with self.subTest(content=content):
+                with zipfile.ZipFile(self.source.path, "w") as archive:
+                    if content is not None:
+                        archive.writestr("tool/linked_scenes.json", content)
+                with self.assertRaisesRegex(RuntimeError, "linked scenes"):
+                    bridge._close_inactive_view(self.source, self.callback)
+        self.assertEqual(self.removed, [])
+
+    def test_pending_native_close_stops_reopen_instead_of_loading_a_duplicate(self):
+        receipt = self.receipt(True)
+        points.reopen_prepare(receipt)
+        self.callback = self.current.domain_scene()
+        opened_before = list(self.views)
+        self.datasource.close_scene = lambda view: None
+        with self.assertRaisesRegex(RuntimeError, "has not completed"):
+            points.reopen(receipt, callback_scene=self.callback)
+        self.assertEqual(self.views, opened_before)
+        record = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(record["phase"], "needs_review:points_verified")
+
+    def test_unexpected_native_removal_of_another_tab_is_detected(self):
+        def unsafe_close(view):
+            self.views.remove(view)
+            self.views.remove(self.user)
+
+        self.datasource.close_scene = unsafe_close
+        with self.assertRaisesRegex(RuntimeError, "another tab"):
+            bridge._close_inactive_view(self.source, self.callback)
+
+    def test_native_close_cannot_silently_change_the_active_anchor(self):
+        def activate_another_tab(view):
+            self.views.remove(view)
+            self.current = self.user
+
+        self.datasource.close_scene = activate_another_tab
+        with self.assertRaisesRegex(RuntimeError, "another tab"):
+            bridge._close_inactive_view(self.source, self.callback)
+
     def test_point_reopen_and_cleanup_keep_each_actual_callback_anchor_alive(self):
         receipt = self.receipt(True)
         prepared = points.reopen_prepare(receipt)
@@ -144,7 +208,7 @@ class KimodoReopenStageTests(unittest.TestCase):
         self.assertEqual(completed["phase"], "completed")
         self.assertNotIn(anchor, self.views)
         self.assertIn(self.user, self.views)
-        self.assertEqual(self.root.joinpath("before.casc").read_bytes(), b"untouched recovery copy")
+        self.assertEqual(self.root.joinpath("before.casc").read_bytes(), self.before_bytes)
 
     def test_point_reopen_rejects_old_idle_context_even_after_prepare_switch(self):
         receipt = self.receipt(True)

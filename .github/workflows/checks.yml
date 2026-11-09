@@ -29,6 +29,10 @@ jobs:
           tests/test_installation.py tests/test_cli.py tests/test_settings.py
           tests/test_server_resources.py
           tests/test_review_settings.py tests/test_review_service.py tests/test_release_metadata.py
+          tests/test_motion_tools.py tests/test_motion_service.py tests/test_smart_motion_panel.py
+          tests/test_atomic.py
+          tests/test_humanoid_mapping.py tests/test_playback.py
+          tests/test_state.py tests/test_curves.py
       - name: Check generation and visual review contracts without GPU services
         run: >-
           uv run pytest -q
@@ -36,6 +40,8 @@ jobs:
           tests/test_kimodo_motion_review.py tests/test_kimodo_native_render.py
           tests/test_kimodo_visual_provider.py
           tests/test_kimodo_pipeline.py tests/test_kimodo_workflow.py
+          tests/test_kimodo_atomic_writers.py
+          tests/test_kimodo_isolated_batch.py
           tests/test_kimodo_cascadeur_bridge.py tests/test_kimodo_native_import.py
           tests/test_kimodo_point_retarget.py tests/test_kimodo_reopen_stages.py
           tests/test_kimodo_compare_motion.py
@@ -43,7 +49,7 @@ jobs:
       - run: uv build
       - name: Discover tools from the built wheel in isolation
         run: >-
-          uv run python -c "import json,pathlib,subprocess; wheel=max(pathlib.Path('dist').glob('*.whl'),key=lambda path:path.stat().st_mtime_ns); result=subprocess.run(['uvx','--isolated','--python','${{ matrix.python }}','--from',str(wheel),'mcp-for-cascadeur','tools','--json'],check=True,capture_output=True,text=True); tools=json.loads(result.stdout); names={tool['name'] for tool in tools}; assert len(tools)>=106; assert {'app_status','recovery_verify','character_retime','fbx_export_verified','subtree_restore','animation_review','visual_review_status'}<=names; print('Wheel tools discovered:',len(tools))"
+          uv run python -c "import json,pathlib,subprocess; wheel=max(pathlib.Path('dist').glob('*.whl'),key=lambda path:path.stat().st_mtime_ns); result=subprocess.run(['uvx','--isolated','--python','${{ matrix.python }}','--from',str(wheel),'mcp-for-cascadeur','tools','--json'],check=True,capture_output=True,text=True); tools=json.loads(result.stdout); names={tool['name'] for tool in tools}; assert len(tools)>=118; assert {'app_status','recovery_verify','character_retime','fbx_export_verified','subtree_restore','animation_review','visual_review_status','kimodo_generate','kimodo_job_status','smart_motion_panel'}<=names; print('Wheel tools discovered:',len(tools))"
       - name: Check the installed wheel through the official MCP SDK
         run: >-
-          uv run python -c "import os,pathlib,subprocess,tempfile; temporary=tempfile.TemporaryDirectory(prefix='cascadeur-wheel-ci-'); root=pathlib.Path(temporary.name); environment=root/'venv'; subprocess.run(['uv','venv','--python','${{ matrix.python }}',str(environment)],check=True); python=environment/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); wheel=max(pathlib.Path('dist').glob('*.whl'),key=lambda path:path.stat().st_mtime_ns); subprocess.run(['uv','pip','install','--python',str(python),str(wheel)],check=True); smoke=pathlib.Path('validation/package_smoke.py').resolve(); variables=dict(os.environ); variables.pop('PYTHONPATH',None); subprocess.run([str(python),str(smoke),'--minimum-tools','106'],cwd=root,env=variables,check=True); temporary.cleanup()"
+          uv run python -c "import os,pathlib,subprocess,tempfile; temporary=tempfile.TemporaryDirectory(prefix='cascadeur-wheel-ci-'); root=pathlib.Path(temporary.name); environment=root/'venv'; subprocess.run(['uv','venv','--python','${{ matrix.python }}',str(environment)],check=True); python=environment/('Scripts/python.exe' if os.name=='nt' else 'bin/python'); wheel=max(pathlib.Path('dist').glob('*.whl'),key=lambda path:path.stat().st_mtime_ns); subprocess.run(['uv','pip','install','--python',str(python),str(wheel)],check=True); smoke=pathlib.Path('validation/package_smoke.py').resolve(); variables=dict(os.environ); variables.pop('PYTHONPATH',None); subprocess.run([str(python),str(smoke),'--minimum-tools','118'],cwd=root,env=variables,check=True); temporary.cleanup()"

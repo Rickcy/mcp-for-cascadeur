@@ -1,9 +1,9 @@
-"""Capture native Cascy poses and express them as coherent SOMA constraints.
+"""Capture mapped native humanoid poses as coherent SOMA constraints.
 
 Capture only reads Cascadeur's stored data on its application thread. Conversion
 and return planning use ordinary Python maths; NumPy is needed only when writing
-the constraint NPZ. The neutral Cascy calibration must come from an unchanged
-template, not from the first pose of an animated clip.
+the constraint NPZ. The neutral rig calibration must come from a suitable anatomical reference,
+not from the first pose of an animated clip.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _file_sha(path):
 
 def _check_calibration(calibration):
     if calibration.get("format") != "cascy-point-calibration-v1":
-        raise ValueError("A neutral Cascy Point calibration is required")
+        raise ValueError("A neutral mapped Point-rig calibration is required")
     if calibration.get("units") != "centimeters" or calibration.get("up_axis") != "Y":
         raise ValueError("Native calibration must use Y-up centimetres")
     if not calibration.get("fingerprint"):
@@ -62,27 +62,32 @@ def capture(view, frames, *, calibration, expected_scene_path=None):
         raise ValueError("Active source scene differs from the requested keypose scene")
     saved_timebase = helper._bridge().scene_settings(path)
     scene = view.domain_scene()
-    rig = characters.resolve_character(scene, require_semantics=True, require_hands=True)
+    rig = helper.resolve_rig(scene, calibration)
     if rig.fingerprint != calibration["fingerprint"]:
-        raise ValueError("Source topology differs from the neutral Cascy calibration")
+        raise ValueError("Source topology differs from the neutral rig calibration")
     model, data = scene.model_viewer(), scene.data_viewer()
     size = int(data.get_animation_size())
     _frames(frames, size)
     by_name = {}
     for obj in rig.joints:
-        name = model.get_object_name(obj)
+        name = next((role for role, value in calibration["joints"].items() if value.get("id") == str(obj)),
+                    model.get_object_name(obj) if calibration.get("profile") != "native-humanoid-v1" else None)
+        if name is None:
+            continue
         if name in by_name:
             raise ValueError("Ambiguous native Joint name: " + name)
         by_name[name] = obj
-    required = set(helper.MAPPING) | {"f_middle1_l", "f_middle1_r"}
+    required = set(helper.MAPPING)
     if required - by_name.keys():
-        raise ValueError("Native source is missing Cascy body or hand Joints")
+        raise ValueError("Native source is missing mapped body or hand Joints")
     for name in helper.MAPPING:
         parent = characters._parent(scene, by_name[name])
         parent_name = model.get_object_name(parent) if parent is not None else None
-        if parent_name != calibration["joints"][name]["parent"]:
+        expected_parent = calibration["joints"][name].get("native_parent", calibration["joints"][name]["parent"])
+        observed_parent = (str(parent) if parent is not None else None) if "native_parent" in calibration["joints"][name] else parent_name
+        if observed_parent != expected_parent:
             raise ValueError("Native parent changed at " + name)
-    controls = {model.get_object_name(rig.controls[key]): binding for key, binding in rig.bindings.items()}
+    controls = {name: rig.bindings[value["id"]] for name, value in calibration["points"].items()}
     if set(controls) != set(calibration["points"]):
         raise ValueError("Native Point membership differs from the neutral calibration")
     original_frame = int(scene.get_current_frame(False))
@@ -129,11 +134,11 @@ def capture(view, frames, *, calibration, expected_scene_path=None):
 def _frames(frames, size):
     if (
         not isinstance(frames, list)
-        or not 2 <= len(frames) <= 120
+        or len(frames) < 2
         or any(type(frame) is not int or not 0 <= frame < size for frame in frames)
         or frames != sorted(set(frames))
     ):
-        raise ValueError("Choose 2-120 sorted, unique, existing zero-based frames")
+        raise ValueError("Choose at least two sorted, unique, existing zero-based frames")
 
 
 def _validate_snapshot(snapshot, calibration):
@@ -249,8 +254,8 @@ def convert(snapshot, calibration, soma_template, *, start_frame=None, num_frame
     source_frames = [row["frame"] for row in snapshot["poses"]]
     start_frame = source_frames[0] if start_frame is None else start_frame
     num_frames = source_frames[-1] - start_frame + 1 if num_frames is None else num_frames
-    if type(start_frame) is not int or type(num_frames) is not int or not 2 <= num_frames <= 120:
-        raise ValueError("Keypose return currently supports 2-120 frames")
+    if type(start_frame) is not int or type(num_frames) is not int or num_frames < 2:
+        raise ValueError("Keypose return requires at least two frames")
     if source_frames[0] < start_frame or source_frames[-1] >= start_frame + num_frames:
         raise ValueError("Captured keyframes fall outside the requested generation interval")
     if source_frames[0] != start_frame:
@@ -268,7 +273,11 @@ def convert(snapshot, calibration, soma_template, *, start_frame=None, num_frame
             i = description["source_index"]
             source_rotations[i] = helper._mm(source_delta, rest_rotations[i])
         rotations, positions = [], []
-        native_root = helper._vector(row["joints"]["pelvis"]["position"])
+        # The forward adapter places the native pelvis Point, whose pivot can
+        # differ from the skeleton's pelvis Joint (notably on the UE rigs).
+        # Inverting a Joint position against a Point anchor introduces that
+        # bind offset into every returned Point, including feet on the floor.
+        native_root = helper._vector(row["points"]["pelvis_MainPoint"])
         source_root = helper._add(rest[root], helper._scale(helper._sub(native_root, anchors["pelvis"]), 1 / scale))
         for i, parent in enumerate(parents):
             if i == root:

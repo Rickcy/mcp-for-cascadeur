@@ -30,8 +30,8 @@ def verify_supported(scene):
     import csc
 
     count = animation._size(scene)
-    if not 1 <= count <= 121:
-        raise UnsupportedCurveState("Checked character edits require 1-121 stored frames")
+    if count < 1:
+        raise UnsupportedCurveState("Checked character edits require stored animation frames")
     manager = csc.additive_layers.get_manager(scene)
     stacked = manager.get_stacked_layers_count()
     if type(stacked) is not int or stacked < 0:

@@ -9,16 +9,120 @@ review. Each part has a separate role, evidence and failure state.
 | Input | Route | Result and limits |
 | --- | --- | --- |
 | Existing animation | Native inspection and bounded Point/curve/finger edits | Keep source, unrelated channels and accepted timing protected. |
-| Text description | Optional Kimodo pipeline | New body/root motion transferred to a separate Cascy scene; 2–120 frames at 30 FPS. |
+| Text description | Optional Kimodo pipeline | New body/root motion transferred to a separate scene for the selected mapped humanoid; 30 FPS, long clips generated in bounded chunks. |
 | Body key poses in Cascadeur | Kimodo keypose mode | Generate a standalone interval constrained by captured native poses; verify returned anchors. |
+| Text or prepared model constraints, raw files only | Kimodo `generate_only` | Retain NPZ/FBX at 30 FPS; no fixed total duration ceiling, native transfer, rendering or visual acceptance. |
 | Video | `mocap_start` | Native Cascadeur Mocap, workspace MP4 or existing video reference; official model must be available. |
 | Existing endpoint poses | `motion_generation_start` | Native pose-based Motion Generation; this is not a text endpoint. |
 | Baked motion | `unbaking_start` | Classic editable intervals; approximation displacement must be measured. |
 | Physics refinement | `autophysics_start` | Calculate/apply native physics with an explicit interval and all-frames/only-keys choice. |
 
 Native menu/API discovery can expose more application functionality, but an
-available method or dispatched action is not a checked workflow. The optional
-Kimodo scripts are checkout CLIs, not additional registered native MCP tools.
+available method or dispatched action is not a checked workflow. Smart Motion
+and the `kimodo_*` MCP tools share one worker service over the prepared checkout
+pipeline. They do not run inference on Cascadeur's application thread.
+
+## Smart Motion panel, MCP and CLI
+
+Install the current checkout and prepared Kimodo assets as described in
+[installation](installation.md#current-checkout-and-smart-motion), then open
+**Scripts > MCP > Smart Motion**. The [panel guide](smart-motion.md) describes
+its controls. The panel creates one animation for the selected character and
+timeline range. It does not render videos or request VLM review. Native body
+keys can be taken directly from the selected range; boundary poses are included
+automatically. Unknown humanoid names can be mapped through the skeleton editor.
+Generation, browsing, cancellation and continuation use the same durable service
+as MCP and the installed CLI. Multiple candidates and visual review remain
+separate API/CLI options.
+
+| Operation | MCP tool | CLI |
+| --- | --- | --- |
+| Read readiness and paths | `kimodo_status` | `motion status` |
+| Set prepared paths and nonsecret defaults | `kimodo_configure` | `motion configure` for prepared paths |
+| Start generation | `kimodo_generate` | `motion generate --request '<request.json>'` |
+| List/read jobs | `kimodo_jobs`, `kimodo_job_status` | `motion jobs`, `motion job <job_id>` |
+| Request a safe stop | `kimodo_cancel` | `motion cancel <job_id>` |
+| Resume verified native/review stages | `kimodo_resume` | `motion resume <job_id>` |
+| Review saved native videos again | `kimodo_review` | `motion review <job_id>` |
+| Open a retained native candidate | `kimodo_select` | `motion select <job_id> candidate-02` |
+| Runtime status/start/stop/build/logs | `kimodo_runtime` | `motion runtime <action>` |
+| Register a previous pipeline run | `kimodo_import_run` | `motion import '<run directory>'` |
+| Open the native panel | `smart_motion_panel` | `motion panel` |
+
+Prefix CLI operations in this table with `mcp-for-cascadeur`. Generation and
+other long operations return a job ID immediately; poll their job status. A
+closed panel or disconnected MCP client does not cancel its external worker.
+Only one worker may own generation/native stages at a time.
+
+A generation request uses the flat `kimodo_generate` arguments. For example,
+save this nonsecret JSON as a CLI request, or pass its fields directly to MCP:
+
+```json
+{
+  "prompt": "A person walks forward naturally at a steady pace",
+  "frames": 120,
+  "samples": 3,
+  "seed": 420,
+  "steps": 50,
+  "cfg_enabled": true,
+  "text_weight": 2.0,
+  "constraint_weight": 2.0,
+  "render_sample_step": 1,
+  "review_enabled": true,
+  "auto_activate": false
+}
+```
+
+The full route validates native availability, recovery, playback and job guards
+before starting GPU work. It generates sequential variants, converts each,
+releases a proven-idle generator, transfers to separate target scenes, measures
+contacts, saves/reopens, renders three views, then optionally requests visual
+review. `auto_activate: false` retains the recommendation without automatically
+activating the final selected scene. Transfers/rendering still use their own
+native scene tabs. `review_enabled: false` retains native results and videos
+without a review request or automatic visual winner. Set `no_render: true` with
+`review_enabled: false` to skip both video and VLM work. That route opens its
+verified native result without treating numerical checks as an artistic score.
+The panel always uses this mode and `samples: 1`.
+
+For an explicit target, supply `target_scene` and `character_id`; optional
+`rig_mapping` binds the 21 body roles to actual Joint IDs/names. The target is
+calibrated before GPU work. `first_frame` records the original timeline origin;
+the retained generated clip starts at frame zero. The panel saves current manual
+changes to a new source copy before submitting the job.
+
+For body anchors, add `source_scene` and an increasing `keyframes` array, such as
+`[0,30,60,90,119]`. The selected interval must span `frames`; capture happens in
+the actual native scene when the job runs. Source frames do not become a promise
+to copy finger or facial articulation. For raw files set `generate_only: true`;
+optional `constraints` names a prepared NPZ inside `workspace/kimodo`, instead
+of native `source_scene`/`keyframes`. Raw generation has no native validation or
+visual score and cannot be resumed/reviewed as if a native transfer existed.
+
+Generation controls include 1–4 candidates, a uint32 seed, 1–200 diffusion steps,
+CFG on/off, text/constraint weights from 0 to 10 and a requested default alias
+`sample_index` smaller than `samples`. The alias does not rank candidate quality.
+The model's output FPS is fixed at 30. Total generation and transfer duration has
+no fixed frame-count ceiling; long inference uses native continuation segments
+of up to 240 frames on the 12 GB configuration. Memory, disk, timeout and native
+index capacity remain real constraints. `render_sample_step` is 1–30, default 2: step 1
+captures every pose; larger steps hold sampled poses in duration-preserving
+videos and limit fine-motion assessment. Port, startup timeout, image build and
+the documented provider/model/sampling budgets are also explicit controls.
+
+Progress reports the current stage and known backend/renderer counts. GPU
+denoising reports its measured percentage; native capture and encoding report
+actual completed frames/views. Stages without a reliable fraction remain
+indeterminate. A cancellation request is not confirmation that work stopped:
+accepted generation finishes, retained candidates are verified, required
+conversion completes and the idle GPU service is released before stopping.
+An in-flight native stage must finish safely before another write is allowed.
+
+Resume does not resubmit generation, repeat an uncertain native write or restart
+an interrupted diffusion pass. It accepts verified native runs stopped at a
+safe boundary, including cooperative cancellation. Raw generation retains its
+files without a native resume route. Provider re-review reuses completed videos,
+does not render or activate scenes and preserves prior review profiles.
 
 ## Inspect and protect the scene
 

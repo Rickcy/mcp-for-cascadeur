@@ -6,10 +6,10 @@ param(
     [string]$ExchangePath,
     [ValidateRange(1024, 65535)]
     [int]$Port = 9552,
-    [ValidateRange(30, 3600)]
+    [ValidateRange(30, 86400)]
     [int]$TimeoutSeconds = 1200,
     [string]$Prompt,
-    [ValidateRange(2, 1800)]
+    [ValidateScript({ $_ -ge 2 })]
     [int]$Frames = 120,
     [ValidateRange(1, 200)]
     [int]$Steps = 50,

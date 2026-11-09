@@ -15,11 +15,13 @@ VIEWS = {"front": [0, 30, 550], "side": [550, 30, 0], "three-quarter": [400, 60,
 
 
 def _write(task):
+    from mcp_for_cascadeur.atomic import replace_file
+
     record = {key: value for key, value in task.items() if not key.startswith("_")}
     target = Path(task["receipt"])
     temporary = target.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(target)
+    replace_file(temporary, target)
 
 
 def _public(task):
@@ -218,7 +220,7 @@ def start(payload):
     timeout = payload.get("timeout", 900)
     if type(step) is not int or not 1 <= step <= 30 or type(timeout) is not int or not 1 <= timeout <= 900:
         raise ValueError("Render step or timeout is outside the supported range")
-    if (original["scene"] != scene or not isinstance(roots, list) or not 2 <= len(roots) <= min(120, original["frame_count"])
+    if (original["scene"] != scene or not isinstance(roots, list) or not 2 <= len(roots) <= original["frame_count"]
             or any(not isinstance(p, list) or len(p) != 3 or any(isinstance(v, bool) or not isinstance(v, (int, float))
                    or not math.isfinite(v) for v in p) for p in roots)):
         raise ValueError("Render scene or root sample sequence is invalid")

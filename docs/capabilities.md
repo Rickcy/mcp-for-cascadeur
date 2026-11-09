@@ -26,6 +26,7 @@ are described in [verification.md](verification.md).
 | Camera and review | `camera_get`, `camera_set`, `camera_frame`, `viewport_mode_set`, `viewport_capture` | Actual camera/display state and fresh PNG output. A screenshot is useful evidence but is not an automatic quality score. |
 | FBX exchange | `fbx_import`, `fbx_export`, `fbx_export_status`, `fbx_export_verified` | Native import/export, entitlement and hash-checked staged publication. Validate receiving-application axes, skeleton and clip range separately. |
 | Visual assessment | `visual_review_status`, `animation_review` | External MCP-process review through Gemini or a local compatible VLM; common schema, media identity and native-receipt acceptance gates. No scene edits. |
+| Smart Motion panel | `smart_motion_panel` | Opens the native panel for the external shared Kimodo job service; inference does not run on Cascadeur's UI thread. |
 | Native actions | `actions_list`, `action_run` | Exact documented action IDs. Dispatch is not successful completion; some actions toggle state or depend on selection/license. |
 | Native API discovery | `api_inspect`, `native_tools_list`, `native_tool_inspect` | Bounded public attributes, signatures and documentation. Inspection does not invoke discovered methods. |
 | Advanced Python | `python_execute` | Explicitly enabled full-privilege native scripting. This is not a substitute for a structured feature or its tests. |
@@ -88,7 +89,9 @@ repeating every large pose. Read actual poses separately when needed.
 
 Checked character writes require a saved scene, exclusive unlocked character
 tracks, supported native IK/curve state and a complete recovery checkpoint.
-The current verified-contract limit is 121 stored frames. Additive stacks,
+Complete recovery is limited by encoded bytes, nodes and channel samples, rather
+than a fixed stored-frame count. Smart Motion uses bounded writes to a new owned
+result and retains its immutable source. Additive stacks,
 cycles, AI interpolation on character tracks and custom spatial tangents are rejected
 by the declared preflight. The actual solver result is checked after the native
 transaction commits, including target residuals, connected-body anchors,
@@ -103,7 +106,9 @@ progress and the checked output. `native_job_cancel` requests a stop;
 `native_job_recover` restores the verified source after an interruption.
 
 These routes target Cascadeur 2026.2.3 build 44356 and the validated native Cascy
-rig, with at most 512 stored frames including a successor guard. Motion Generation
+rig. Their prior native acceptance covers up to 512 stored frames including a
+successor guard; removing a shared capture ceiling does not verify larger native
+solver jobs. Full recovery must still fit its data budgets. Motion Generation
 fills existing endpoint poses; text generation belongs to a separate provider.
 Mocap accepts an MP4 in the workspace or a native video reference. The official
 model must already be cached unless its download was explicitly allowed.
@@ -219,11 +224,43 @@ supported acceptance claim. See [verification.md](verification.md).
 
 ## Optional generation and visual assessment
 
-The optional checkout pipeline `integrations/kimodo/pipeline.py` supports text
-and captured body-keypose generation through Kimodo-SOMA-RP-v1.2. It transfers
-2–120 frames at 30 FPS to the validated Cascy body, preserving world root placement.
+Smart Motion, the `kimodo_*` MCP tools and the installed `motion` CLI share a
+durable external job service and the prepared checkout pipeline
+`integrations/kimodo/pipeline.py`. Text and captured body-keypose generation use
+Kimodo-SOMA-RP-v1.2. The native route transfers 30 FPS motion to the selected
+mapped humanoid, preserving root placement. Long generation uses native
+continuation chunks of up to 240 frames without a fixed total duration ceiling.
 It does not transfer finger articulation or guarantee a seamless loop. Native
 video capture uses `mocap_start`; Kimodo's integration is not a video endpoint.
+
+| Job capability | Tools | Scope |
+| --- | --- | --- |
+| Setup and readiness | `kimodo_status`, `kimodo_configure` | Existing checkout/calibration/template paths and nonsecret defaults; no implicit model downloads or API keys. |
+| Generate motion | `kimodo_generate` | Returns an asynchronous job ID. Selected `target_scene`/`character_id` and optional custom role mapping; raw NPZ/FBX through `generate_only`. 30 FPS and 1–4 API candidates; no fixed total clip cap. |
+| Read durable work | `kimodo_jobs`, `kimodo_job_status` | Stage, measured progress when available, artifacts, provider reports and errors; does not resubmit work. |
+| Stop and continue | `kimodo_cancel`, `kimodo_resume` | Cooperative boundary cancellation; resume verified native stages without regeneration or replay of unknown writes. |
+| Re-evaluate saved evidence | `kimodo_review` | Completed native videos, same or another provider/profile; no generation, transfer, rendering or scene activation. |
+| Explicit native choice | `kimodo_select` | Saved candidate scene and completion-receipt integrity checked before activation. An explicit choice is not automatic quality acceptance. |
+| Runtime management | `kimodo_runtime` | Status/start/stop/build/logs for the prepared integration; stopping requires a proven-idle worker. Retains models and animation outputs. |
+| Existing results | `kimodo_import_run` | Registers an existing workspace pipeline run for browsing, checked activation or re-review. |
+
+The full route checks native availability and editing guards before GPU work.
+Raw generation can run without Cascadeur, calibration or reviewer credentials;
+prepared constraint NPZ files are restricted to the exchange directory and
+hash-bound before submission. Native body anchors use `source_scene` plus an
+increasing `keyframes` array spanning the requested interval. Raw runs have no
+native geometry, persistence or visual acceptance; their saved files cannot be
+passed off as a completed native transfer.
+
+Generation exposes diffusion steps, deterministic seeds, CFG, text/constraint
+weights, requested default alias and optional image build. Native rendering has
+an explicit sample step; the selected cadence is recorded in review evidence.
+Visual review and final automatic activation can be disabled separately. The
+panel and MCP share the same pipeline. The panel always creates one animation,
+sets no-render/no-review, and contains no VLM settings, visual scores or candidate
+count. It takes the selected timeline range and captures current poses from an
+isolated source copy. Known UE5/UEFN rigs are mapped automatically; custom human
+rigs can assign their 21 anatomical roles through native Joint IDs.
 
 The generator retains 1–4 sequential candidates. Each native result must pass
 geometry, save/reopen and required-anchor checks before automatic acceptance.

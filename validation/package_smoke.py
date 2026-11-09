@@ -28,7 +28,7 @@ from mcp_for_cascadeur.settings import Config
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-tools", type=int, help="Optional exact full registry count")
-    parser.add_argument("--minimum-tools", type=int, default=106)
+    parser.add_argument("--minimum-tools", type=int, default=118)
     arguments = parser.parse_args()
     imported = Path(mcp_for_cascadeur.__file__).resolve()
     if not imported.is_relative_to(Path(sys.prefix).resolve()):

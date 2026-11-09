@@ -1,5 +1,6 @@
 """Check native import dispatch guards and transport uncertainty without Cascadeur."""
 
+import hashlib
 import importlib.util
 import json
 import tempfile
@@ -169,8 +170,11 @@ class KimodoNativeImportTests(unittest.TestCase):
             cli._runner_client("http://127.0.0.1:8765", 36)
 
     def test_real_point_receipt_module_integrates_with_cli_before_native_submission(self):
+        plan = self.directory / "point-plan.json"
+        plan.write_text(json.dumps({"point_bindings": {"pelvis_MainPoint": "native-point"}}), encoding="utf-8")
         self.record.update(
-            schema="kimodo-point-session-v1", phase="points_prepared", num_frames=120, next_frame=0
+            schema="kimodo-point-session-v1", phase="points_prepared", num_frames=120, next_frame=0,
+            plan_path=str(plan), plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
         )
         self.write_record()
         calls = []

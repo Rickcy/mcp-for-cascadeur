@@ -119,6 +119,18 @@ def test_capture_covers_every_static_setting_animated_frame_and_property(native_
     assert state.digest(before) == state.digest(state.capture(scene))
 
 
+def test_long_clip_checkpoint_uses_data_budgets_instead_of_512_frame_ceiling(native_model):
+    scene, model, _ = native_model
+    model["count"] = 2049
+    model["channels"]["data:position"]["values"] = [1.0] * 2049
+    captured = state.capture(scene)
+    assert captured["count"] == 2049
+    assert len(captured["channels"]["data:position"]["values"]) == 2049
+    state.validate(captured)
+    with pytest.raises(state.StateError, match="at most 512"):
+        state.capture(scene, max_frames=512)
+
+
 def test_tolerance_applies_only_to_animated_data_not_settings_or_metadata():
     before, after = checkpoint(), checkpoint(1.005)
     assert state.compare(before, after)["equivalent"]
@@ -442,7 +454,7 @@ def test_capture_limits_refuse_before_any_mutation(native_model):
     scene, model, _ = native_model
     model["count"] = 513
     with pytest.raises(state.StateError, match="at most"):
-        state.capture(scene)
+        state.capture(scene, max_frames=512)
 
 
 def test_unknown_native_values_and_nonfinite_data_are_rejected(native_model):

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -48,7 +49,10 @@ class WorkflowTests(unittest.TestCase):
                     path.write_bytes(PNG)
                     images.append({"view": label, "frame": frame, "path": str(path)})
             self.render_task = {"id": "render-id", "receipt": str(output / "native-render.json"),
+                                "pid": 42, "scene": str(self.scene.resolve()),
                                 "state": "completed", "completed": len(images), "total": len(images),
+                                "frame_count": len(payload["roots"]), "frame_step": payload["frame_step"],
+                                "frame_indices": frames, "fps": 30,
                                 "images": images, "restoration": {"restored": True}, "error": None}
             workflow.write(self.render_task["receipt"], self.render_task)
             return self.render_task
@@ -80,6 +84,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow.native(client, "frame", {"frame": 9}), {"frame": 9})
         self.assertEqual(client._request.call_args.args[0], "/run")
 
+    def test_long_measurement_uses_bounded_contiguous_reads_including_the_last_frame(self):
+        calls = []
+        def measure(client, operation, payload):
+            calls.append((operation, payload))
+            return {"fps": 30, "units": "centimeters", "frames": list(range(
+                payload["first_frame"], payload["first_frame"] + payload["count"]))}
+        with mock.patch.object(workflow, "native", side_effect=measure):
+            result = workflow.measure(None, "target.casc", 1801, calibration="target-calibration.json")
+        self.assertEqual(result["frames"], list(range(1801)))
+        self.assertTrue(all(row[1]["count"] <= 120 and row[1]["calibration"] == "target-calibration.json"
+                            for row in calls))
+        self.assertEqual(calls[-1][1]["count"], 1)
+
+    def test_incomplete_native_measurement_is_rejected(self):
+        with mock.patch.object(workflow, "native", return_value={"fps": 30, "units": "centimeters", "frames": []}):
+            with self.assertRaisesRegex(RuntimeError, "differs"):
+                workflow.measure(None, "target.casc", 121)
+
     def test_native_transport_failure_and_native_error_are_not_success(self):
         client = mock.Mock()
         client._request.return_value = {"ok": False}
@@ -89,6 +111,25 @@ class WorkflowTests(unittest.TestCase):
                                         "messages": [{"level": "error", "text": "solver failed"}]}
         with self.assertRaisesRegex(RuntimeError, "native error"):
             workflow.native(client, "frame", {})
+
+    def test_native_transport_error_keeps_bounded_redacted_diagnostics_without_retrying(self):
+        client = mock.Mock()
+        key = "AQ." + "a" * 32
+        client._request.return_value = {
+            "ok": False,
+            "error": "Traceback\n" + "context " * 1000
+                     + "\nTimed out waiting for Cascadeur idle event; api_key='fixture-secret' " + key,
+        }
+        with self.assertRaises(RuntimeError) as raised:
+            workflow.native(client, "render_status", {"id": "render-id"})
+        message = str(raised.exception)
+        self.assertIn("outcome is unknown", message)
+        self.assertIn("Timed out waiting for Cascadeur idle event", message)
+        self.assertIn("[redacted]", message)
+        self.assertNotIn("fixture-secret", message)
+        self.assertNotIn(key, message)
+        self.assertLess(len(message), 1800)
+        client._request.assert_called_once()
 
     def test_native_dispatch_requires_trusted_python_and_expected_scene(self):
         common = types.SimpleNamespace(
@@ -110,6 +151,29 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "active scene differs"):
                 workflow.native_dispatch("camera_read", {"scene": str(self.root / "other.casc")})
             host.scene.camera_get.assert_not_called()
+
+    def test_mapped_native_measurement_ignores_virtual_axes_and_reads_the_requested_offset(self):
+        roles = ("pelvis", "foot_l", "toe_l", "foot_r", "toe_r")
+        calibration = self.root / "calibration.json"
+        workflow.write(calibration, {"joints": {**{name: {"id": str(i)} for i, name in enumerate(roles)},
+                                                "f_middle1_l": {"position": [0, 0, 0]}}})
+        data = types.SimpleNamespace(get_animation_size=lambda: 181,
+                                     get_data_value=lambda channel, frame: [frame, 0, 0])
+        scene = types.SimpleNamespace(model_viewer=lambda: mock.Mock(), data_viewer=lambda: data)
+        host = types.ModuleType("mcp_for_cascadeur.host")
+        host.common = types.SimpleNamespace(
+            current_context=lambda: (None, None, types.SimpleNamespace(get_path_name=lambda: str(self.scene)), scene),
+            get_settings=lambda: {"allow_python": True})
+        host.characters = types.SimpleNamespace(_transform_data=lambda *args: "position")
+        host.recovery = types.SimpleNamespace(status=lambda: {}, active_transaction=lambda: None)
+        host.jobs, host.playback, host.scene = mock.Mock(), mock.Mock(), mock.Mock()
+        points = types.SimpleNamespace(resolve_rig=lambda *args: types.SimpleNamespace(joints=list(map(str, range(5)))),
+                                       _vector=lambda vector: vector)
+        with mock.patch.dict(sys.modules, {"mcp_for_cascadeur.host": host}), \
+                mock.patch.object(workflow, "module", return_value=points):
+            result = workflow.native_dispatch("measure", {"scene": str(self.scene), "calibration": str(calibration),
+                                                           "first_frame": 180, "count": 1})
+        self.assertEqual(result["frames"], [{role: [180, 0, 0] for role in roles}])
 
     def test_capture_does_not_overwrite_existing_metadata(self):
         output = self.root / "constraints.npz"
@@ -220,6 +284,62 @@ class WorkflowTests(unittest.TestCase):
                                                                        {"phase": "completed"}]), step=mock.Mock())
         return calibration, motion, points, importer
 
+    def test_target_timebase_is_read_from_the_saved_scene_and_rejects_60_fps(self):
+        for fps in (30, 60):
+            with zipfile.ZipFile(self.scene, "w") as archive:
+                archive.writestr("scene/scene_settings.json", json.dumps({"Data": {"FPS": fps, "UnitLength": "cm"}}))
+            if fps == 30:
+                self.assertEqual(workflow.target_settings(self.scene)["fps"], 30)
+            else:
+                with self.assertRaisesRegex(ValueError, "30 FPS"):
+                    workflow.target_settings(self.scene)
+
+    def test_transfer_reports_only_readback_confirmed_frame_batches_without_repeating_steps(self):
+        calibration, motion, points, importer = self.transfer_fixture()
+        points.build_plan.return_value["num_frames"] = 40
+        receipt = Path(points.prepare.return_value["receipt_path"])
+        phases = [("points_ready:0", 0), ("points_ready:20", 20), ("points_applied", 40), ("completed", 40)]
+        cursor = 0
+
+        def persist():
+            record = workflow.read(receipt)
+            record.update(phase=phases[cursor][0], next_frame=phases[cursor][1], num_frames=40)
+            workflow.write(receipt, record)
+
+        def status(*args):
+            return {"phase": phases[cursor][0]}
+
+        def step(*args):
+            nonlocal cursor
+            cursor += 1
+            persist()
+
+        persist()
+        importer.status, importer.step = mock.Mock(side_effect=status), mock.Mock(side_effect=step)
+        observations = []
+        with mock.patch.object(workflow, "module", side_effect=lambda name: {
+                "point_retarget": points, "native_import": importer}[name]), contextlib.redirect_stdout(io.StringIO()):
+            workflow.transfer(None, motion, calibration, self.scene, self.root / "transfer",
+                              progress_callback=observations.append)
+        self.assertEqual([(row["completed"], row["total"]) for row in observations],
+                         [(0, 40), (20, 40), (40, 40), (40, 40)])
+        self.assertEqual(importer.step.call_count, 3)
+
+    def test_transfer_rejects_false_completed_cursor_without_another_native_step(self):
+        calibration, motion, points, importer = self.transfer_fixture()
+        points.build_plan.return_value["num_frames"] = 40
+        receipt = Path(points.prepare.return_value["receipt_path"])
+        record = workflow.read(receipt)
+        record.update(phase="completed", next_frame=20, num_frames=40)
+        workflow.write(receipt, record)
+        importer.status = mock.Mock(return_value={"phase": "completed"})
+        with mock.patch.object(workflow, "module", side_effect=lambda name: {
+                "point_retarget": points, "native_import": importer}[name]):
+            with self.assertRaisesRegex(RuntimeError, "completion differs"):
+                workflow.transfer(None, motion, calibration, self.scene, self.root / "transfer",
+                                  progress_callback=lambda value: None)
+        importer.step.assert_not_called()
+
     def test_transfer_uses_actual_point_coordinates_verified_persistence_flag(self):
         calibration, motion, points, importer = self.transfer_fixture()
         with mock.patch.object(workflow, "module", side_effect=lambda name: {
@@ -287,6 +407,57 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([operation for operation, _ in self.calls], ["render_start", "render_status"])
         self.assertEqual([item["fps"] for item in videos], [30, 30, 30])
         self.assertTrue(self.render_task["restoration"]["restored"])
+
+    def test_render_callback_reports_real_frame_and_encoded_view_counts(self):
+        observations = []
+        with self.render_patches():
+            workflow.render(None, self.scene, self.measurement, self.root / "render",
+                            progress_callback=observations.append)
+        frames = [row for row in observations if row["stage"] == "native_render"]
+        encoded = [row for row in observations if row["stage"] == "encoding_review"]
+        self.assertEqual(frames[-1]["completed"], frames[-1]["total"])
+        self.assertEqual(frames[-1]["state"], "completed")
+        self.assertEqual([row["completed"] for row in encoded], [0, 1, 2])
+        self.assertEqual([row["view"] for row in encoded], ["front", "side", "three-quarter"])
+
+    def test_render_progress_uses_the_journal_until_the_native_owner_is_terminal(self):
+        def foreground_panel(client, operation, payload):
+            if operation == "render_status":
+                self.assertEqual(self.render_task["state"], "completed",
+                                 "An active renderer cannot depend on scene-idle HTTP polling")
+            value = self.fake_native(client, operation, payload)
+            if operation == "render_start":
+                value.update(state="running", completed=0, restoration=None)
+                workflow.write(value["receipt"], value)
+            return value
+
+        def native_timer_advances(delay):
+            self.render_task["completed"] += 3
+            if self.render_task["completed"] == self.render_task["total"]:
+                self.render_task.update(state="completed", restoration={"restored": True})
+            workflow.write(self.render_task["receipt"], self.render_task)
+
+        with self.render_patches(native=foreground_panel), \
+                mock.patch.object(workflow.time, "sleep", side_effect=native_timer_advances):
+            videos = workflow.render(None, self.scene, self.measurement, self.root / "render")
+        self.assertEqual(len(videos), 3)
+        self.assertEqual([operation for operation, _ in self.calls], ["render_start", "render_status"])
+
+    def test_changed_render_journal_cannot_select_an_owner_or_delete_scratch(self):
+        def tampered(client, operation, payload):
+            value = self.fake_native(client, operation, payload)
+            if operation == "render_start":
+                record = workflow.read(value["receipt"])
+                record["pid"] += 1
+                workflow.write(value["receipt"], record)
+            return value
+
+        output = self.root / "render"
+        with self.render_patches(native=tampered):
+            with self.assertRaisesRegex(RuntimeError, "receipt identity"):
+                workflow.render(None, self.scene, self.measurement, output)
+        self.assertEqual([operation for operation, _ in self.calls], ["render_start", "render_cancel"])
+        self.assertEqual(len(list(output.glob("frames-*/*.png"))), 9)
 
     def test_renderer_error_after_writing_png_cleans_own_scratch_and_restores(self):
         def fail(client, operation, payload):

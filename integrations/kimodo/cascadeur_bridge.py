@@ -42,13 +42,11 @@ def _input_file(value, suffix):
     return path.resolve()
 
 
-def scene_settings(path):
-    """Read the saved native timebase, including Cascadeur's Zstandard ZIPs."""
-    path = _input_file(path, ".casc")
-    member = "scene/scene_settings.json"
+def _scene_json(path, member, maximum_size):
+    """Read one bounded native JSON member, including Cascadeur's Zstandard ZIPs."""
     with zipfile.ZipFile(path) as archive:
-        if archive.getinfo(member).file_size > 64 * 1024:
-            raise ValueError("Native scene settings exceed the supported size")
+        if archive.getinfo(member).file_size > maximum_size:
+            raise ValueError(f"Native scene member is too large: {member}")
         try:
             content = archive.read(member)
         except NotImplementedError:
@@ -66,7 +64,15 @@ def scene_settings(path):
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             content = result.stdout
-    data = json.loads(content)["Data"]
+    if len(content) > maximum_size:
+        raise ValueError(f"Native scene member is too large: {member}")
+    return json.loads(content)
+
+
+def scene_settings(path):
+    """Read the saved native timebase, including Cascadeur's Zstandard ZIPs."""
+    path = _input_file(path, ".casc")
+    data = _scene_json(path, "scene/scene_settings.json", 64 * 1024)["Data"]
     if data.get("FPS") != 30 or data.get("UnitLength") != "cm":
         raise ValueError("The bridge requires native scenes with 30 FPS and centimetre units")
     return {"fps": data["FPS"], "unit_length": data["UnitLength"], "gravity": data.get("Gravity")}
@@ -104,10 +110,12 @@ def validate_generation(manifest_path, fbx_path):
 
 
 def _write(receipt_path, record):
+    from mcp_for_cascadeur.atomic import replace_file
+
     destination = Path(receipt_path)
     temporary = destination.with_name(destination.name + ".pending")
     temporary.write_text(json.dumps(record, indent=2, allow_nan=False), encoding="utf-8")
-    os.replace(temporary, destination)
+    replace_file(temporary, destination)
 
 
 def _read(receipt_path):
@@ -205,14 +213,43 @@ def _require_callback_anchor(anchor_view, callback_scene):
 
 
 def _close_inactive_view(view, callback_scene):
-    _, _, manager = _application()
+    """Close an owned, saved scene without expanding closure to linked scenes.
+
+    Callers retain their scene-idle anchor in another tab and save any owned
+    edits first. The native close can return before a dialog/queued callback
+    completes; that outcome must stop the stage instead of reopening the file.
+    """
+    _, app, manager = _application()
     if callback_scene is None:
         raise RuntimeError("Scene closure requires an explicit native callback scene")
-    if manager.current_scene() == view or view.domain_scene() == callback_scene:
+    current = manager.current_scene()
+    before = list(manager.scenes())
+    if view not in before:
+        raise RuntimeError("The owned scene is no longer open; inspect before retrying closure")
+    if current == view or view.domain_scene() == callback_scene:
         raise RuntimeError(
             "Refusing to close the active tab or the scene held by the current native callback"
         )
-    manager.remove_application_scene(view)
+    if current is None or current not in before or not any(
+        item.domain_scene() == callback_scene for item in before
+    ):
+        raise RuntimeError("The active tab and native callback anchor must remain open")
+    path = _input_file(view.get_path_name(), ".casc")
+    try:
+        linked = _scene_json(path, "tool/linked_scenes.json", 1024 * 1024)
+        isolated = isinstance(linked, dict) and isinstance(linked.get("Data"), dict) and not linked["Data"]
+    except (KeyError, ValueError, OSError, zipfile.BadZipFile) as error:
+        raise RuntimeError("Cannot confirm that the saved owned scene has no linked scenes") from error
+    if not isolated:
+        raise RuntimeError("Refusing automatic closure of a scene with linked scenes")
+    app.get_data_source_manager().close_scene(view)
+    after = list(manager.scenes())
+    if view in after:
+        raise RuntimeError(
+            "Native scene close has not completed; inspect the pending close before retrying"
+        )
+    if manager.current_scene() != current or any(item not in after for item in before if item != view):
+        raise RuntimeError("Native scene close changed another tab or its retained callback anchor")
 
 
 def _stage(receipt_path, expected, completed, function):
@@ -625,6 +662,8 @@ def cleanup(receipt_path, *, callback_scene=None):
         result = _find_view(record, "result")
         _require_callback_anchor(result, callback_scene)
         source = _find_view(record, "source")
+        # FBX import edits this disposable source; save it so close_scene needs no save dialog.
+        source.save(str(_owned_path(record, "source")))
         _close_inactive_view(source, callback_scene)
         deleted = []
         for kind in ("source", "target"):

@@ -33,6 +33,7 @@ class PlaybackSession:
     frame_set_calls: int = 0
     stop_verified: bool = False
     samples: list[dict] = field(default_factory=list)
+    samples_dropped: int = 0
     error: str | None = None
 
 
@@ -81,6 +82,7 @@ def _public(session):
         "first": session.first,
         "last": session.last,
         "samples": list(session.samples),
+        "samples_dropped": session.samples_dropped,
         "stop_verified": session.stop_verified,
         "native_play_commands": session.play_commands,
         "native_stop_commands": session.stop_commands,
@@ -123,10 +125,14 @@ def _observe(session, *, now=None):
         frame = int(scene.get_current_frame(False))
         if frame != session.last_frame:
             session.last_change = now
+            sample = {"seconds": round(now - session.started, 6), "frame": frame, "phase": session.phase}
             if len(session.samples) < 512:
-                session.samples.append(
-                    {"seconds": round(now - session.started, 6), "frame": frame, "phase": session.phase}
-                )
+                session.samples.append(sample)
+            elif session.phase == "playing":
+                # Keep the most recent frame so long clips retain end coverage,
+                # while the observer's diagnostic log remains bounded.
+                session.samples[-1] = sample
+                session.samples_dropped += 1
         prior = session.last_frame
         session.last_frame = frame
         if session.phase == "checking":
@@ -173,8 +179,8 @@ def playback_start(first, last, timeout=8):
     require_idle()
     if type(first) is not int or type(last) is not int or first < 0 or last <= first:
         raise ValueError("Choose distinct increasing integer playback boundaries.")
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0.5 <= timeout <= 20:
-        raise ValueError("timeout must be between 0.5 and 20 seconds.")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0.5:
+        raise ValueError("timeout must be finite and at least 0.5 seconds.")
     _, _, view, scene = common.current_context()
     if last >= scene.data_viewer().get_animation_size():
         raise ValueError("Playback requires existing stored frames.")
@@ -241,7 +247,7 @@ TOOLS = [
         {
             "first": {"type": "integer", "minimum": 0},
             "last": {"type": "integer", "minimum": 1},
-            "timeout": {"type": "number", "minimum": 0.5, "maximum": 20, "default": 8},
+            "timeout": {"type": "number", "minimum": 0.5, "default": 8},
         },
         ("first", "last"),
         False,

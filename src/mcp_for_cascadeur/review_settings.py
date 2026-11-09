@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .atomic import replace_file
 from .settings import data_home
 
 PROVIDERS = ("gemini", "openai-compatible")
@@ -86,7 +87,7 @@ def _atomic_bytes(path, data):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(path)
+        replace_file(temporary, path)
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()

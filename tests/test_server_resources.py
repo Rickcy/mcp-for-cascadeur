@@ -75,9 +75,11 @@ async def test_workflow_and_capability_resources_ship_without_native_connection(
         capabilities = json.loads((await session.read_resource("cascadeur://capabilities")).contents[0].text)
         contracts = json.loads((await session.read_resource("cascadeur://tools")).contents[0].text)
         assert capabilities["registered_mcp_tools"] == sorted(item["name"] for item in contracts)
-        assert capabilities["routes"]["text_or_body_keypose_generation"]["registered_mcp_tool"] is False
+        assert capabilities["routes"]["text_or_body_keypose_generation"]["registered_mcp_tool"] is True
+        assert capabilities["routes"]["text_or_body_keypose_generation"]["entry"] == "kimodo_generate"
         assert capabilities["visual_review"]["quality_parity_verified"] is False
-        assert capabilities["limits"]["kimodo_transferred_frames"] == [2, 120]
+        assert capabilities["limits"]["kimodo_transferred_frames"] == [2, None]
+        assert capabilities["limits"]["smart_motion_panel_visual_review"] is False
         assert "Qwen3-VL" in workflow and "Gemini" in workflow
         assert "needs_revision" in workflow
         assert "not a video-mocap endpoint" in workflow

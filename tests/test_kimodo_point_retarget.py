@@ -110,6 +110,22 @@ class KimodoPointRetargetTests(unittest.TestCase):
         self.assertEqual(plan["root_displacement"], [0, 0, 20])
         self.assertEqual(plan["source_npz_sha256"], "test-motion")
 
+    def test_long_clip_retains_every_frame_and_native_point_identity(self):
+        calibration, motion = self.fixture()
+        count = 361
+        motion["num_frames"] = count
+        motion["positions"] = [[retarget._add(point, [0, 0, frame]) for point in motion["rest_positions"]]
+                               for frame in range(count)]
+        motion["rotations"] = [[IDENTITY for _ in motion["joint_names"]] for _ in range(count)]
+        calibration["character_id"] = "chosen-custom-rig"
+        for index, point in enumerate(calibration["points"].values()):
+            point["id"] = "native-control-" + str(index)
+        plan = retarget.build_plan(calibration, motion)
+        self.assertEqual([row["frame"] for row in plan["frames"]], list(range(count)))
+        self.assertEqual(plan["root_displacement"], [0, 0, count - 1])
+        self.assertEqual(plan["character_id"], "chosen-custom-rig")
+        self.assertEqual(plan["point_bindings"], {name: value["id"] for name, value in calibration["points"].items()})
+
     def test_neutral_root_at_zero_does_not_raise_character_by_a_metre(self):
         calibration, motion = self.fixture()
         motion["rest_positions"] = [retarget._sub(point, [0, 100, 0]) for point in motion["rest_positions"]]

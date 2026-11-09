@@ -10,7 +10,9 @@ import hashlib
 import json
 import math
 
-MAX_FRAMES = 512
+# Native frame indices are signed 32-bit integers. Recovery is bounded by
+# encoded bytes, nodes and channel samples rather than an arbitrary clip size.
+MAX_FRAMES = 2**31 - 1
 MAX_OBJECTS = 1024
 MAX_BYTES = 64 * 1024 * 1024
 MAX_NODES = 4_000_000

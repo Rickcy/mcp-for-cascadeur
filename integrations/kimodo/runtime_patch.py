@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-PATCH_VERSION = "cascadeur-runtime-v7"
+PATCH_VERSION = "cascadeur-runtime-v8"
 
 
 def replace_once(source, old, new):
@@ -175,7 +175,7 @@ def patch_backend(source):
     source = replace_once(
         source,
         "import numpy as np",
-        "import numpy as np\n\nfrom kimodo.cascadeur_runtime import (\n    validate_generation_request, verify_text_encoder_health, write_motion_manifest,\n    configured_model_name, checkpoint_details, generate_candidate_set,\n    load_constraints as load_verified_constraints,\n)",
+        "import numpy as np\n\nfrom kimodo.cascadeur_runtime import (\n    validate_generation_request, verify_text_encoder_health, write_motion_manifest,\n    configured_model_name, checkpoint_details, generate_candidate_set, generation_segments,\n    load_constraints as load_verified_constraints,\n)",
     )
     source = replace_once(
         source,
@@ -234,19 +234,27 @@ def patch_backend(source):
 
         def generate_one(candidate):
             api["seed_everything"](candidate["seed"])
+            segments = generation_segments(candidate["num_frames"])
+            segment_index = 0
 
             def progress_bar(iterable):
+                nonlocal segment_index
                 total = len(iterable)
+                offset = (candidate["candidate_index"] * len(segments) + segment_index) * total
+                all_steps = payload["num_samples"] * len(segments) * total
+                job.emit_status(f"Generating segment {segment_index + 1}/{len(segments)}")
                 for step, value in enumerate(iterable, 1):
-                    job.emit_progress(candidate["candidate_index"] * total + step, payload["num_samples"] * total)
+                    job.emit_progress(offset + step, all_steps)
                     yield value
+                segment_index += 1
 
             with torch.inference_mode():
                 output = model(
-                    candidate["prompt"], candidate["num_frames"],
+                    [candidate["prompt"]] * len(segments) if len(segments) > 1 else candidate["prompt"],
+                    segments if len(segments) > 1 else candidate["num_frames"],
                     constraint_lst=[constraint] if constraint is not None else [],
                     num_denoising_steps=candidate["diffusion_steps"],
-                    num_samples=1, multi_prompt=False, post_processing=True,
+                    num_samples=1, multi_prompt=len(segments) > 1, post_processing=True,
                     return_numpy=True, progress_bar=progress_bar, **cfg_kwargs,
                 )
             single = select_sample(output, 0, 1)
@@ -340,6 +348,21 @@ def patch_backend(source):
     return source
 
 
+def patch_motion_model(source):
+    """Keep upstream continuation semantics and report each diffusion window."""
+    tree = ast.parse(source)
+    owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Kimodo")
+    method = next(node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "_multiprompt")
+    lines = source.splitlines(keepends=True)
+    body = "".join(lines[method.lineno - 1:method.end_lineno])
+    body = replace_once(body, "                cfg_type=cfg_type,\n            )",
+                        "                cfg_type=cfg_type,\n                progress_bar=progress_bar,\n            )")
+    lines[method.lineno - 1:method.end_lineno] = [body]
+    result = "".join(lines)
+    ast.parse(result)
+    return result
+
+
 def patch_fbx_export(source):
     source = replace_once(
         source, "import torch", "import torch\n\nfrom kimodo.cascadeur_runtime import fbx_wrapper_transform"
@@ -372,6 +395,7 @@ def apply_runtime_patch(root):
     changes = {}
     for relative, patch in (
         ("kimodo/model/registry.py", patch_model_registry),
+        ("kimodo/model/kimodo_model.py", patch_motion_model),
         ("kimodo/model/llm2vec/llm2vec_wrapper.py", patch_encoder),
         ("kimodo/model/llm2vec/llm2vec.py", patch_llm_loader),
         ("kimodo/scripts/run_text_encoder_server.py", patch_text_server),

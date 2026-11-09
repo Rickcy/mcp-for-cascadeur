@@ -14,6 +14,7 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from .atomic import replace_file
 from .settings import Config, data_home
 
 HOOK_NAME = "mcp_for_cascadeur.py"
@@ -120,7 +121,7 @@ def _write_text(path: Path, content: str) -> None:
     temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(content, encoding="utf-8", newline="\n")
-        temporary.replace(path)
+        replace_file(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -131,6 +132,10 @@ def install_runtime(config: Config) -> Path:
     python_root = data_home() / "runtime" / "python"
     package_root = python_root / "mcp_for_cascadeur"
     files = [source / "__init__.py", source / "contracts.py", *sorted((source / "host").rglob("*.py"))]
+    if (source / "settings.py").is_file():
+        files.append(source / "settings.py")
+    if (source / "atomic.py").is_file():
+        files.append(source / "atomic.py")
     if not files[0].is_file() or not files[1].is_file() or not (source / "host" / "__init__.py").is_file():
         raise InstallationError(
             "PACKAGE_INCOMPLETE", "The installed package does not contain the host runtime."
@@ -139,6 +144,9 @@ def install_runtime(config: Config) -> Path:
         destination = package_root / current.relative_to(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(current, destination)
+    _write_text(data_home() / "smart-motion-panel.json", json.dumps({
+        "external_python": str(Path(sys.executable).expanduser().absolute()),
+    }, indent=2) + "\n")
     start_script = data_home() / "start_bridge.py"
     _write_text(
         start_script,
@@ -157,6 +165,54 @@ def install_runtime(config: Config) -> Path:
 
 def _state_path() -> Path:
     return data_home() / "installation.json"
+
+
+def install_panel_menu(config: Config, bridge_script: Path) -> dict:
+    """Add an owned Scripts > MCP entry without replacing vendor scripts."""
+    if config.cascadeur_home is None:
+        raise InstallationError("CASCADEUR_NOT_FOUND", "Select a Cascadeur installation first.")
+    target = scripts_directory(config.cascadeur_home) / "scripts/mcp/smart_motion.py"
+    content = (
+        '"""Smart Motion generation and review panel."""\n\n'
+        'def name():\n    return "MCP.Smart Motion"\n\n'
+        'def description():\n    return "Generate, constrain and compare Kimodo motion"\n\n'
+        'def run(scene):\n'
+        f'    with open({str(bridge_script)!r}, encoding="utf-8") as source:\n'
+        '        exec(compile(source.read(), "<smart-motion-bridge>", "exec"), {"__name__": "__main__"})\n'
+        '    from mcp_for_cascadeur.host.smart_motion import show_panel\n'
+        '    return show_panel()\n'
+    )
+    state = _load_state()
+    if target.exists():
+        current = target.read_bytes()
+        owned = state.get("panel_menu", {})
+        if current != content.encode("utf-8") and (
+            owned.get("path") != str(target) or owned.get("sha256") != _digest(current)
+        ):
+            raise InstallationError("PANEL_MENU_CONFLICT", "An unrelated Smart Motion menu script has been preserved.")
+    _write_text(target, content)
+    state["panel_menu"] = {"path": str(target), "sha256": _digest(content.encode("utf-8"))}
+    _write_text(_state_path(), json.dumps(state, indent=2) + "\n")
+    return {"installed": True, "path": str(target), "menu": "Scripts > MCP > Smart Motion"}
+
+
+def uninstall_panel_menu(home: str | Path | None = None) -> dict:
+    state = _load_state()
+    owned = state.get("panel_menu")
+    if not owned:
+        return {"removed": False, "reason": "not_installed"}
+    target = Path(owned["path"])
+    if home is not None and target != scripts_directory(Path(home)) / "scripts/mcp/smart_motion.py":
+        raise InstallationError("PANEL_MENU_CONFLICT", "The menu belongs to another Cascadeur installation.")
+    if target.name != "smart_motion.py" or target.parent.name != "mcp":
+        raise InstallationError("INSTALLATION_STATE_INVALID", "The recorded panel menu path is invalid.")
+    if target.exists():
+        if _digest(target.read_bytes()) != owned.get("sha256"):
+            raise InstallationError("PANEL_MENU_CONFLICT", "The modified menu script has been preserved.")
+        target.unlink()
+    state.pop("panel_menu", None)
+    _write_text(_state_path(), json.dumps(state, indent=2) + "\n")
+    return {"removed": True, "path": str(target)}
 
 
 def _load_state() -> dict:

@@ -81,6 +81,32 @@ def test_startup_hook_uses_deferred_native_main_thread(isolated_installation, tm
     assert not target.exists()
 
 
+def test_panel_menu_preserves_vendor_scripts_and_modified_entry(isolated_installation, tmp_path):
+    home, scripts = isolated_installation
+    config = Config(cascadeur_home=home)
+    bridge = tmp_path / "stable bridge.py"
+    result = installation.install_panel_menu(config, bridge)
+    target = Path(result["path"])
+    assert result["menu"] == "Scripts > MCP > Smart Motion"
+    compile(target.read_text(), str(target), "exec")
+    assert "MCP.Smart Motion" in target.read_text()
+    assert (scripts / "scripts/mcp/script_server/server.py").read_text() == "# vendor sentinel"
+    installation.install_panel_menu(config, bridge)
+    target.write_text(target.read_text() + "# custom edit\n")
+    with pytest.raises(installation.InstallationError, match="modified"):
+        installation.uninstall_panel_menu(home)
+    assert target.exists()
+
+
+def test_panel_menu_uninstall_only_removes_the_owned_entry(isolated_installation, tmp_path):
+    home, scripts = isolated_installation
+    config = Config(cascadeur_home=home)
+    installation.install_panel_menu(config, tmp_path / "bridge.py")
+    assert installation.uninstall_panel_menu(home)["removed"]
+    assert not (scripts / "scripts/mcp/smart_motion.py").exists()
+    assert (scripts / "scripts/mcp/script_server/server.py").is_file()
+
+
 def test_codex_edits_preserve_other_servers_comments_and_backup(tmp_path):
     target = tmp_path / "config.toml"
     original = '# preserve this comment\nmodel = "example"\n[mcp_servers.blender]\ncommand = "uvx"\nargs = ["mcp-for-blender"]\n'

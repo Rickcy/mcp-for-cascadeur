@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 
 from . import __version__
 from .host import registry
+from .motion_tools import TOOL_NAMES as MOTION_TOOLS
 from .runner import RunnerClient, RunnerError
 from .settings import Config, load_config
 
@@ -97,8 +98,10 @@ validation. Use character_edit_readiness before checked character writes.
 
 2. Choose the route that matches the input.
 - Existing animation: read/measure it and use a bounded native edit.
-- Text: optional integrations/kimodo/pipeline.py run generates new motion through
-  the external Kimodo Docker service, then transfers it to a separate Cascy scene.
+- Text: kimodo_generate or the native Smart Motion panel starts the shared
+  pipeline through the external Kimodo Docker service, then transfers motion
+  to a separate scene for the selected mapped humanoid. Use kimodo_status and
+  kimodo_configure first; target_scene and character_id identify the target.
 - Body key poses: the same pipeline captures selected existing native frames,
   converts their skeleton/units/floor/first-root/heading to SOMA, generates the
   interval, reverses the coordinate conversion and checks the returned anchors.
@@ -119,13 +122,24 @@ author validated finger-local rotations separately. Captured Kimodo constraints
 cover the body, not finger articulation, facial motion or attached armor physics.
 
 4. Generate, author or run a native operation.
-The optional Kimodo route supports 2-120 transferred frames at 30 FPS and 1-4
-retained candidates. Calculate candidates sequentially on a 12 GB GPU; release
+The optional Kimodo route uses 30 FPS and has no fixed total clip-length ceiling.
+Long generation uses sequential native-continuation chunks of at most 240
+frames on a 12 GB GPU. The MCP API retains 1-4 candidates; the panel creates one
+animation per request. Calculate candidates sequentially; release
 the idle generator/encoder service before native review or a local visual model.
 Do not start heavyweight inference on Cascadeur's main thread. Record the prompt,
 seed, checkpoint, input hashes and output paths. Preserve all generated candidates.
-Use the pipeline's run.json and stage receipts; there is no registered
-kimodo_generate MCP tool in this release.
+Use kimodo_job_status and the pipeline's run.json/stage receipts. Generation is
+asynchronous: retain the returned job ID. kimodo_cancel requests a safe stop;
+it does not kill an uncertain native/GPU operation. kimodo_resume reuses verified
+stages without generating again. kimodo_review re-evaluates retained videos and
+kimodo_select opens a chosen saved candidate. smart_motion_panel opens these same
+jobs in Cascadeur. The panel uses the selected native character and timeline
+range, saves a source copy, and skips rendering and VLM entirely. Its result is
+checked for native geometry and save/reopen integrity. Body mappings for known
+UE5/UEFN rigs are automatic; custom humanoids need complete native role bindings.
+Generate-only retains raw NPZ/FBX without native transfer or visual acceptance.
+Duration remains subject to real memory, disk, time and native index capacity.
 Use unbaking_start to obtain classic editable intervals from baked motion when
 needed. Some approximation displacement is expected: measure it against the
 source and chosen tolerance. Use CLAMPED_BEZIER through native interpolation
@@ -143,8 +157,10 @@ certifies foot planting. Preserve protected channels and animation outside the
 declared edit interval. Use curve-preserving Point tools for existing keys and
 character_retime for its supported synchronized 2-8-key timing edits.
 
-6. Perform provider-neutral visual review.
-Render the resulting Cascy motion from front, side and three-quarter views at
+6. Perform provider-neutral visual review when the chosen workflow requests it.
+Interactive Smart Motion requests do not render videos or contact a VLM. Keep
+that mode free of visual-review requirements. For assistant-driven review, render
+the resulting motion from front, side and three-quarter views at
 consistent speed and framing. Use native frame rendering with scene updates
 between captures, then CPU video encoding. Declare sampling/held-frame cadence;
 still images establish pose evidence, not temporal smoothness.
@@ -209,23 +225,31 @@ def _capabilities(tools):
             "native_unbaking": {"interface": "MCP", "entry": "unbaking_start"},
             "native_physics": {"interface": "MCP", "entry": "autophysics_start"},
             "text_or_body_keypose_generation": {
-                "interface": "optional checkout CLI",
-                "entry": "integrations/kimodo/pipeline.py run",
-                "registered_mcp_tool": False,
+                "interface": "MCP and native Smart Motion panel; prepared Kimodo checkout required",
+                "entry": "kimodo_generate",
+                "registered_mcp_tool": True,
+                "panel": "smart_motion_panel",
+                "durable_jobs": True,
                 "checkpoint": "Kimodo-SOMA-RP-v1.2",
                 "finger_articulation": False,
                 "automatic_seamless_loop": False,
             },
         },
         "limits": {
-            "checked_character_stored_frames": 121,
+            "checked_character_stored_frames": None,
+            "checkpoint_limits": {"bytes": 64 * 1024 * 1024, "nodes": 4_000_000, "channel_samples": 2_000_000},
             "terminal_guard_writable": False,
             "character_retime_synchronized_keys": [2, 8],
-            "native_job_stored_frames_including_guard": 512,
-            "kimodo_transferred_frames": [2, 120],
+            "native_job_stored_frames_including_guard": None,
+            "native_job_verified_stored_frames": 512,
+            "kimodo_transferred_frames": [2, None],
+            "kimodo_raw_generation_frames": [2, None],
+            "kimodo_generation_chunk_frames": 240,
+            "smart_motion_panel_samples": 1,
+            "smart_motion_panel_visual_review": False,
             "kimodo_fps": 30,
             "kimodo_retained_candidates": [1, 4],
-            "native_playback_seconds": 20,
+            "native_playback_seconds": None,
         },
         "visual_review": {
             "interface": "packaged MCP",
@@ -243,15 +267,16 @@ def _capabilities(tools):
     }
 
 
-OFFHOST_TOOLS = frozenset({"animation_review", "visual_review_status"})
+OFFHOST_TOOLS = frozenset({"animation_review", "visual_review_status"}) | MOTION_TOOLS
 
 
 def tool_definitions(config: Config):
     """Combine native contracts with external visual analysis without importing csc."""
+    from .motion_tools import tools as motion_tools
     from .review_service import tools as review_tools
 
     definitions = registry()
-    for definition in review_tools(config):
+    for definition in [*review_tools(config), *motion_tools(config)]:
         if definition.name in definitions:
             raise RuntimeError("Duplicate native and visual-review tool name")
         definitions[definition.name] = definition
@@ -361,7 +386,7 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
                 annotations=types.ToolAnnotations(
                     readOnlyHint=definition.read_only,
                     destructiveHint=not definition.read_only and definition.name not in OFFHOST_TOOLS,
-                    openWorldHint=definition.name == "animation_review",
+                    openWorldHint=definition.name == "animation_review" or definition.name in MOTION_TOOLS,
                 ),
             )
             for definition in tools.values()
@@ -381,7 +406,8 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
                 result = await asyncio.to_thread(tools[name].handler, **values)
                 payload = {
                     "ok": True, "result": result, "execution_state": "completed",
-                    "executor": "visual_review", "adapter_version": __version__,
+                    "executor": "smart_motion" if name in MOTION_TOOLS else "visual_review",
+                    "adapter_version": __version__,
                 }
                 png = None
             else:
@@ -401,7 +427,8 @@ def create_server(config: Config, client: RunnerClient | None = None) -> Server:
             payload = {"error": error.as_dict()}
         except Exception as error:
             payload = {
-                "error": {"code": type(error).__name__, "message": str(error), "execution_state": "unknown"}
+                "error": {"code": getattr(error, "code", type(error).__name__), "message": str(error),
+                          "execution_state": getattr(error, "execution_state", "unknown")}
             }
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=json.dumps(payload))],

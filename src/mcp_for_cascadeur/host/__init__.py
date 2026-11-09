@@ -69,6 +69,7 @@ def registry() -> dict[str, Tool]:
         profiles,
         recovery,
         scene,
+        smart_motion,
         subtrees,
         workflows,
     )
@@ -102,6 +103,8 @@ def registry() -> dict[str, Tool]:
         *subtrees.TOOLS,
         *data_channels.TOOLS,
         *jobs.TOOLS,
+        Tool("smart_motion_panel", "Open the native Smart Motion panel for Kimodo generation, body anchors, retained variants and visual review. Does not edit animation when opening.",
+             smart_motion.show_panel),
     ]
     result = {tool.name: tool for tool in definitions}
     if len(result) != len(definitions):

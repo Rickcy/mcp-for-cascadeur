@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .atomic import replace_file
+
 
 def data_home() -> Path:
     override = os.environ.get("MCP_FOR_CASCADEUR_HOME")
@@ -92,5 +94,5 @@ def save_config(config: Config, path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_text(json.dumps(config.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(target)
+    replace_file(temporary, target)
     return target

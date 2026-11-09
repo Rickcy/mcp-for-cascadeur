@@ -11,7 +11,45 @@
 The external package does not install replacement Qt/Python packages inside
 Cascadeur. Native handlers use the application's own runtime on its main thread.
 
-## Release installation
+## Current checkout and Smart Motion
+
+The Smart Motion panel and `kimodo_*` MCP tools are newer than the published
+`release/0.1.0` tag. Until a release containing them is published, install the
+current prepared checkout with its animation dependencies:
+
+```powershell
+uv tool install --force ".[animation]"
+mcp-for-cascadeur setup --install-startup --local-tool --allow-python
+mcp-for-cascadeur motion status --json
+```
+
+Setup installs **Scripts > MCP > Smart Motion** and records the external tool
+Python used by its worker service. Restart Cascadeur after installation. The
+panel uses the Qt already shipped with Cascadeur; do not install PySide or model
+dependencies into the application's Python environment.
+
+Configure the prepared Kimodo checkout and inputs once:
+
+```powershell
+mcp-for-cascadeur motion configure --checkout 'D:\Projects\mcp-for-cascadeur' --template-motion 'D:\Animation\soma-template.json'
+```
+
+These paths refer to existing assets; configuration does not download weights or
+accept model licenses. The panel calibrates the chosen character from its native
+scene, saves an isolated source, and requires trusted Python. The SOMA template
+is needed for body anchors. Legacy API callers may still configure an explicit
+calibration and target template. Raw generation needs the prepared checkout and GPU
+runtime but does not require a running Cascadeur or native calibration.
+
+Open the menu entry or call `mcp-for-cascadeur motion panel`. Prompt, anchors,
+generation settings, saved results and runtime controls use the same
+service as MCP. See [Smart Motion](smart-motion.md) and the
+[shared job workflow](workflow.md#smart-motion-panel-mcp-and-cli).
+
+## Earlier tagged release
+
+The existing tag installs the earlier native bridge and standalone visual
+reviewer. It does not include Smart Motion or the `kimodo_*` job tools:
 
 ```powershell
 uvx --from git+https://github.com/Rickcy/mcp-for-cascadeur@release/0.1.0 mcp-for-cascadeur setup --install-startup
@@ -44,8 +82,6 @@ keeps MCP client configuration under your control.
     "cascadeur": {
       "command": "uvx",
       "args": [
-        "--from",
-        "git+https://github.com/Rickcy/mcp-for-cascadeur@release/0.1.0",
         "mcp-for-cascadeur"
       ]
     }
@@ -54,17 +90,20 @@ keeps MCP client configuration under your control.
 ```
 
 Use the absolute `uvx` path when a desktop client does not inherit the terminal's
-PATH. Keep the native HTTP runner on loopback. The MCP stdio process supplies the
+PATH. This example uses the permanently installed tool with the `animation`
+extra. A temporary `uvx --from` installation of the earlier tag does not expose
+the current panel or Kimodo MCP jobs. Keep the native HTTP runner on loopback. The MCP stdio process supplies the
 structured tools; the native runner itself is not an authenticated network service.
 
 ## Checkout or wheel
 
 ```powershell
-uv tool install .
-mcp-for-cascadeur setup --install-startup --local-tool
+uv tool install --force ".[animation]"
+mcp-for-cascadeur setup --install-startup --local-tool --allow-python
 ```
 
-Or install a built `mcp_for_cascadeur-0.1.0-py3-none-any.whl` with `uv tool install`.
+Or install the wheel built from the current checkout with `uv tool install` and
+its `animation` extra.
 This avoids relying on a temporary source path. Installation from Git/wheel does
 not imply the package is published to PyPI. Optional Kimodo scripts require the
 prepared source/model checkout and are documented [separately](../integrations/kimodo/README.md).
@@ -96,8 +135,8 @@ decoder. A persistent tool installation keeps those dependencies available to
 the configured MCP process:
 
 ```powershell
-uv tool install --force "mcp-for-cascadeur[animation] @ git+https://github.com/Rickcy/mcp-for-cascadeur@release/0.1.0"
-mcp-for-cascadeur setup --install-startup --local-tool
+uv tool install --force ".[animation]"
+mcp-for-cascadeur setup --install-startup --local-tool --allow-python
 ```
 
 This installs the review client and decoder. The local Qwen server and its model
@@ -117,7 +156,9 @@ ID or durable receipt first. Restart Cascadeur after updating imported modules.
 
 ## Removal
 
-`mcp-for-cascadeur uninstall` removes recorded integration entries while retaining
-user scenes, models and settings. Remove a permanent uv tool with
+`mcp-for-cascadeur uninstall` removes recorded integration entries, including
+the owned Smart Motion menu, while retaining user scenes, models and settings.
+Wait for any Smart Motion worker to reach a safe terminal state before updating
+or removing its installed tool. Remove a permanent uv tool with
 `uv tool uninstall mcp-for-cascadeur`. Model/cache cleanup is a separate explicit
 operation; never delete the animation workspace to uninstall the bridge.

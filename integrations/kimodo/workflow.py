@@ -12,6 +12,7 @@ import ast
 import importlib.util
 import json
 import math
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -31,11 +32,32 @@ def read(path):
 
 
 def write(path, payload):
+    from mcp_for_cascadeur.atomic import replace_file
+
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    replace_file(temporary, path)
+
+
+def _native_error_detail(response):
+    error = response.get("error")
+    if isinstance(error, dict):
+        error = error.get("message") or error.get("type")
+    parts = [error] if isinstance(error, str) and error else []
+    parts.extend(item["text"] for item in response.get("messages", [])[-3:]
+                 if isinstance(item, dict) and str(item.get("level", "")).lower() == "error"
+                 and isinstance(item.get("text"), str))
+    text = "\n".join(parts)
+    text = re.sub(r"(?:AIza[\w-]{20,}|AQ\.[\w-]{20,}|sk-[\w-]{20,}|gh[pousr]_[\w-]{20,}|hf_[\w-]{20,})",
+                  "[redacted]", text)
+    text = re.sub(r"(?i)(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)[\"']?\s*[:=]\s*"
+                  r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", "credential=[redacted]", text)
+    text = re.sub(r"(?i)(?:authorization\s*:\s*)?(?:bearer|basic)\s+[A-Za-z0-9_+/=.-]+", "[redacted authorization]", text)
+    text = re.sub(r"(https?://)[^\s/@:]+:[^\s/@]+@", r"\1[redacted]@", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text).strip()
+    return ("..." + text[-1600:]) if len(text) > 1600 else text
 
 
 def native(client, operation, payload):
@@ -51,10 +73,14 @@ def native(client, operation, payload):
     )
     result = client._request("/run", {"code": expression})
     if result.get("ok") is not True:
-        raise RuntimeError("Native request outcome is unknown; inspect before retrying")
+        detail = _native_error_detail(result)
+        raise RuntimeError("Native request outcome is unknown; inspect before retrying"
+                           + (". Native error: " + detail if detail else ""))
     value = json.loads(ast.literal_eval(result["value"]))
     if any(str(item.get("level", "")).lower() == "error" for item in result.get("messages", [])):
-        raise RuntimeError("Cascadeur reported a native error; inspect before continuing")
+        detail = _native_error_detail(result)
+        raise RuntimeError("Cascadeur reported a native error; inspect before continuing"
+                           + (": " + detail if detail else ""))
     return value
 
 
@@ -82,6 +108,9 @@ def native_dispatch(operation, payload):
         return module("keypose_constraints").capture(
             view, payload["frames"], calibration=read(payload["calibration"]), expected_scene_path=expected
         )
+    if operation == "calibrate":
+        return module("point_retarget").calibrate(view, character=payload["character_id"],
+                                                   frame=payload.get("frame", 0), mapping=payload.get("mapping"))
     if operation == "frame":
         frame = payload["frame"]
         if type(frame) is not int or not 0 <= frame < scene.data_viewer().get_animation_size():
@@ -99,15 +128,23 @@ def native_dispatch(operation, payload):
     if operation == "mode":
         return scene_api.viewport_mode_set(payload["mode"])
     if operation == "measure":
-        rig = characters.resolve_character(scene, require_semantics=True)
+        calibration = read(payload["calibration"]) if payload.get("calibration") else None
+        rig = (module("point_retarget").resolve_rig(scene, calibration) if calibration else
+               characters.resolve_character(scene, require_semantics=True))
         model, data = scene.model_viewer(), scene.data_viewer()
-        names = {model.get_object_name(obj): obj for obj in rig.joints}
+        if calibration:
+            by_id = {str(obj): obj for obj in rig.joints}
+            names = {name: by_id[item["id"]] for name, item in calibration["joints"].items() if "id" in item}
+        else:
+            names = {model.get_object_name(obj): obj for obj in rig.joints}
         count = payload["count"]
-        if type(count) is not int or not 2 <= count <= min(120, data.get_animation_size()):
+        first = payload.get("first_frame", 0)
+        if (type(count) is not int or count < 1 or type(first) is not int or first < 0
+                or first + count > data.get_animation_size()):
             raise ValueError("Unsupported native sample count")
         wanted = ("pelvis", "foot_l", "toe_l", "foot_r", "toe_r")
         rows = []
-        for frame in range(count):
+        for frame in range(first, first + count):
             rows.append({
                 name: module("point_retarget")._vector(data.get_data_value(
                     characters._transform_data(scene, names[name], "global_position"), frame
@@ -115,6 +152,22 @@ def native_dispatch(operation, payload):
             })
         return {"fps": 30, "units": "centimeters", "frames": rows}
     raise ValueError("Unknown workflow operation")
+
+
+def measure(client, scene, count, *, calibration=None):
+    """Read long clips in short read-only requests without monopolizing Qt."""
+    if type(count) is not int or count < 2:
+        raise ValueError("At least two native frames are required")
+    rows = []
+    for first in range(0, count, 120):
+        payload = {"scene": str(scene), "first_frame": first, "count": min(120, count - first)}
+        if calibration:
+            payload["calibration"] = str(calibration)
+        chunk = native(client, "measure", payload)
+        if chunk.get("fps") != 30 or chunk.get("units") != "centimeters" or len(chunk.get("frames", [])) != payload["count"]:
+            raise RuntimeError("Native measurement differs from the requested frame range")
+        rows.extend(chunk["frames"])
+    return {"fps": 30, "units": "centimeters", "frames": rows}
 
 
 def constraint_preflight(payload, *, floor_tolerance_m=0.05, origin_tolerance_m=0.0001,
@@ -192,8 +245,15 @@ def capture_constraints(client, scene, frames, calibration, template, output):
             "conversion_roundtrip": roundtrip, "neural_input_preflight": preflight}
 
 
-def transfer(client, motion, calibration, template_scene, output, snapshot=None):
+def target_settings(scene):
+    """Inspect the saved target timebase before starting a model job."""
+    return module("cascadeur_bridge").scene_settings(scene)
+
+
+def transfer(client, motion, calibration, template_scene, output, snapshot=None, *, progress_callback=None):
     """Keep native recovery stages separate; retain their receipt on any failure."""
+    if progress_callback is not None and not callable(progress_callback):
+        raise ValueError("progress_callback must be callable")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     plan_path = output / "point-plan.json"
@@ -207,8 +267,26 @@ def transfer(client, motion, calibration, template_scene, output, snapshot=None)
     session = points.prepare(output, plan_path, template_scene)
     receipt = session["receipt_path"]
     write(output / "transfer.json", session)
+    reported = (-1, None)
     while True:
         state = importer.status(client, receipt)
+        if progress_callback is not None:
+            observed = read(receipt)
+            phase = observed.get("phase")
+            total, count = observed.get("num_frames"), observed.get("next_frame")
+            if (phase != state["phase"] or type(total) is not int or total != plan.get("num_frames")
+                    or type(count) is not int or not 0 <= count <= total or count < reported[0] or total < 2):
+                raise RuntimeError("Native transfer progress differs from its verified session")
+            cursor = re.fullmatch(r"points_ready:(\d+)", phase or "")
+            if (phase == "points_prepared" and count != 0
+                    or phase in {"points_applied", "points_saved", "points_reopen_ready", "points_verified", "completed"}
+                       and count != total):
+                raise RuntimeError("Native transfer completion differs from its durable cursor")
+            verified = phase in {"points_prepared", "points_applied", "points_saved", "points_reopen_ready",
+                                 "points_verified", "completed"} or cursor is not None and int(cursor[1]) == count
+            if verified and (count, phase) != reported:
+                progress_callback({"stage": "native_transfer", "completed": count, "total": total, "phase": phase})
+                reported = (count, phase)
         if state["phase"] == "completed":
             break
         print(json.dumps({"stage": "native_transfer", "phase": state["phase"], "receipt": receipt}), flush=True)
@@ -296,20 +374,57 @@ def _encode_rendered_images(images, frame_count, video, ffmpeg):
         raise RuntimeError("Video encoding did not produce a complete review file")
 
 
-def render(client, scene, measurement, output, *, frame_step=2):
+def _render_record(task, output, scene, frame_count, frame_step):
+    """Read only the fresh task's bounded, identity-checked native journal."""
+    expected_path = output / "native-render.json"
+    original = Path(task["receipt"])
+    if original.is_symlink() or original.resolve() != expected_path or not original.is_file():
+        raise RuntimeError("Native render receipt is missing or outside its owned output")
+    with original.open("rb") as stream:
+        raw = stream.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise RuntimeError("Native render receipt exceeds 4 MiB")
+    record = json.loads(raw)
+    frames = list(range(0, frame_count, frame_step))
+    if frames[-1] != frame_count - 1:
+        frames.append(frame_count - 1)
+    expected_images = [
+        {"view": label, "frame": frame, "path": str(output / ("frames-" + label) / f"{index:04d}.png")}
+        for label in ("front", "side", "three-quarter") for index, frame in enumerate(frames)
+    ]
+    total = len(expected_images)
+    if (not isinstance(record, dict) or record.get("id") != task["id"]
+            or type(record.get("pid")) is not int or record["pid"] < 1 or record["pid"] != task.get("pid")
+            or record.get("scene") != str(Path(scene).resolve()) or record.get("scene") != task.get("scene")
+            or record.get("receipt") != str(expected_path)
+            or type(record.get("completed")) is not int or not 0 <= record["completed"] <= total
+            or record.get("total") != total or task.get("total") != total
+            or record.get("frame_count") != frame_count or record.get("frame_step") != frame_step
+            or record.get("fps") != 30 or record.get("frame_indices") != frames
+            or record.get("images") != expected_images
+            or record.get("state") not in {"running", "completed", "failed", "cancelled"}):
+        raise RuntimeError("Native render receipt identity, frame coverage or owned paths changed")
+    if record["state"] == "completed" and record["completed"] != total:
+        raise RuntimeError("Native render receipt declares completion without every requested image")
+    return record
+
+
+def render(client, scene, measurement, output, *, frame_step=2, progress_callback=None):
     """Render on a bounded native Qt timer; encode exact-duration videos on CPU."""
     import imageio_ffmpeg
 
     if type(frame_step) is not int or not 1 <= frame_step <= 30:
         raise ValueError("frame_step must be an integer from 1 to 30")
+    if progress_callback is not None and not callable(progress_callback):
+        raise ValueError("progress_callback must be callable")
     if measurement.get("fps") != 30 or measurement.get("units") != "centimeters":
         raise ValueError("Native render samples must use 30 FPS and centimetres")
     roots = [row["pelvis"] for row in measurement["frames"]]
-    if not 2 <= len(roots) <= 120 or any(
+    if len(roots) < 2 or any(
         len(point) != 3 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
                                for x in point) for point in roots
     ):
-        raise ValueError("Native render samples require 2–120 finite pelvis positions")
+        raise ValueError("Native render samples require at least two finite pelvis positions")
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -323,21 +438,39 @@ def render(client, scene, measurement, output, *, frame_step=2):
         identity = {"id": task["id"], "receipt": task["receipt"]}
         deadline = time.monotonic() + 930
         reported = -1
+        last_completed = 0
         while time.monotonic() < deadline:
-            task = native(client, "render_status", identity)
-            percent = int(task["completed"] * 100 / task["total"])
+            observed = _render_record(task, output, scene, len(roots), frame_step)
+            if observed["completed"] < last_completed:
+                raise RuntimeError("Native render receipt progress moved backwards")
+            last_completed = observed["completed"]
+            percent = int(observed["completed"] * 100 / observed["total"])
+            if progress_callback:
+                progress_callback({"stage": "native_render", "completed": observed["completed"],
+                                   "total": observed["total"], "state": observed["state"]})
             if percent // 10 != reported:
-                print(json.dumps({"stage": "native_render", "progress": percent, "state": task["state"]}), flush=True)
+                print(json.dumps({"stage": "native_render", "progress": percent, "state": observed["state"]}), flush=True)
                 reported = percent // 10
-            if task["state"] != "running":
+            if observed["state"] != "running":
+                # A busy render need not produce scene-idle events. Confirm its
+                # live native owner once, after the timer has restored the scene.
+                confirmed = native(client, "render_status", identity)
+                if any(confirmed.get(key) != observed.get(key) for key in ("id", "pid", "scene", "receipt", "total", "completed")):
+                    raise RuntimeError("Native render completion differs from its durable receipt")
+                task = confirmed
                 terminal = task["state"] in {"completed", "failed", "cancelled"}
                 break
             time.sleep(1)
         if task["state"] != "completed" or task.get("restoration", {}).get("restored") is not True:
             raise RuntimeError("Native PNG rendering did not complete with verified state restoration: "
                                + str(task.get("error")))
-        receipt = read(task["receipt"])
-        for label in ("front", "side", "three-quarter"):
+        receipt = _render_record(task, output, scene, len(roots), frame_step)
+        if receipt["state"] != "completed" or receipt.get("restoration", {}).get("restored") is not True:
+            raise RuntimeError("Native render journal lacks confirmed completion and restoration")
+        for index, label in enumerate(("front", "side", "three-quarter")):
+            if progress_callback:
+                progress_callback({"stage": "encoding_review", "completed": index,
+                                   "total": 3, "state": "running", "view": label})
             images = [item for item in receipt["images"] if item["view"] == label]
             video = output / (label + ".mp4")
             _encode_rendered_images(images, len(roots), video, imageio_ffmpeg.get_ffmpeg_exe())
@@ -352,8 +485,14 @@ def render(client, scene, measurement, output, *, frame_step=2):
             except Exception:
                 terminal = False
         # Never erase a PNG while an unknown native owner may still be writing it.
+        receipt = None
         if terminal and task and Path(task["receipt"]).is_file():
-            receipt = read(task["receipt"])
+            try:
+                receipt = _render_record(task, output, scene, len(roots), frame_step)
+            except (OSError, ValueError, KeyError, RuntimeError):
+                # A changed journal cannot grant ownership of files for cleanup.
+                pass
+        if receipt is not None:
             directories = set()
             for item in receipt.get("images", []):
                 path = Path(item["path"])

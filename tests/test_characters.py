@@ -256,6 +256,15 @@ def test_point_plan_requires_complete_id_set_before_any_write(native):
         )
 
 
+def test_general_point_guard_remains_while_isolated_long_root_motion_can_opt_out(native):
+    rig = characters.resolve_character(native.scene)
+    entries = [{"frame": 0, "pose": {key: {"position": [20000, 0, 0]} for key in rig.controls}}]
+    with pytest.raises(ValueError, match="10000"):
+        characters._point_plan(native.scene, rig, entries, False)
+    plan = characters._point_plan(native.scene, rig, entries, False, coordinate_limit=None)
+    assert all(target[0] == 20000 for target in plan[0][1].values())
+
+
 def test_hand_nonunit_quaternion_rejected_before_native_modification(native, monkeypatch):
     view = SimpleNamespace(get_path_name=lambda: "saved.casc")
     monkeypatch.setattr(common, "current_context", lambda: (None, None, view, native.scene))

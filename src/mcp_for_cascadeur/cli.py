@@ -82,6 +82,30 @@ def build_parser() -> argparse.ArgumentParser:
         entry.add_argument("--json", action="store_true")
         if operation == "set":
             entry.add_argument("--from-env", metavar="VARIABLE", help="Read an existing environment variable instead of prompting.")
+    motion = commands.add_parser("motion", help="Manage the jobs shared by Smart Motion and MCP.")
+    motion_commands = motion.add_subparsers(dest="motion_command", required=True)
+    for operation in ("status", "jobs", "panel"):
+        entry = motion_commands.add_parser(operation)
+        entry.add_argument("--json", action="store_true")
+    entry = motion_commands.add_parser("configure")
+    for name in ("checkout", "calibration", "template-motion", "template-scene"):
+        entry.add_argument("--" + name)
+    entry.add_argument("--json", action="store_true")
+    entry = motion_commands.add_parser("generate")
+    entry.add_argument("--request", required=True, type=Path, help="JSON with the same options as kimodo_generate.")
+    entry.add_argument("--json", action="store_true")
+    for operation in ("job", "cancel", "resume", "review", "select"):
+        entry = motion_commands.add_parser(operation)
+        entry.add_argument("job_id")
+        if operation == "select":
+            entry.add_argument("candidate_id")
+        entry.add_argument("--json", action="store_true")
+    entry = motion_commands.add_parser("runtime")
+    entry.add_argument("action", choices=("status", "start", "stop", "build", "logs"))
+    entry.add_argument("--json", action="store_true")
+    entry = motion_commands.add_parser("import")
+    entry.add_argument("output", type=Path)
+    entry.add_argument("--json", action="store_true")
     return parser
 
 
@@ -114,6 +138,40 @@ def main(argv: list[str] | None = None) -> int:
             _output(result, args.json)
             return 0
         config = load_config()
+        if command == "motion":
+            from .motion_tools import tools as motion_tools
+
+            contracts = {tool.name: tool for tool in motion_tools(config)}
+            operation = args.motion_command
+            if operation == "panel":
+                from .runner import RunnerClient
+
+                result = RunnerClient(config.endpoint, config.workspace, allow_python=config.allow_python).call(
+                    "smart_motion_panel", {}
+                )
+            else:
+                name = {"job": "job_status", "import": "import_run"}.get(operation, operation)
+                values = {}
+                if operation == "configure":
+                    values = {name: getattr(args, name) for name in
+                              ("checkout", "calibration", "template_motion", "template_scene") if getattr(args, name)}
+                elif operation == "generate":
+                    if args.request.stat().st_size > 1024 * 1024:
+                        raise ValueError("Motion request exceeds 1 MiB")
+                    values = json.loads(args.request.read_text(encoding="utf-8"))
+                elif operation == "runtime":
+                    values = {"action": args.action}
+                elif operation == "import":
+                    values = {"output": str(args.output.resolve())}
+                elif operation not in {"status", "jobs"}:
+                    values = {"job_id": args.job_id}
+                    if operation == "select":
+                        values["candidate_id"] = args.candidate_id
+                definition = contracts["kimodo_" + name]
+                definition.validate(values)
+                result = definition.handler(**values)
+            _output(result, args.json)
+            return 0
         if command == "serve":
             from .server import main as serve
 
@@ -149,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cascadeur_home": str(home),
                 "workspace": str(config.workspace),
                 "start_bridge": str(bridge),
+                "panel": installation.install_panel_menu(config, bridge),
             }
             if args.install_startup:
                 result["startup"] = installation.install_startup(config, bridge)
@@ -178,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             result = {
                 "ok": True,
                 "startup": installation.uninstall_startup(args.cascadeur_home or config.cascadeur_home),
+                "panel": installation.uninstall_panel_menu(args.cascadeur_home or config.cascadeur_home),
             }
             if args.client == "codex":
                 result["codex"] = installation.configure_codex(remove=True)
